@@ -1,0 +1,85 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+## 1. プロジェクト概要
+
+Channelioからの問い合わせWebhookを受け取り、Supabase DB (pgvector) の情報を参照してOpenAI APIで回答案を生成し、Slackに通知するSupabase Functions (Edge Functions) を開発します。
+
+## 2. 目的
+
+-   オペレーターの問い合わせ対応負荷軽減
+-   顧客への初期応答時間の短縮
+
+## 3. 主要技術スタック
+
+-   **ランタイム:** Deno (Supabase Edge Functions)
+-   **言語:** TypeScript
+-   **データベース:** Supabase (PostgreSQL + pgvector拡張)
+-   **ベクトル検索:** Supabase pgvector
+-   **AIモデル:** OpenAI API (Embeddings API, Chat Completions API - gpt-3.5-turbo想定)
+-   **通知:** Slack API (Incoming Webhooks または Web API `chat.postMessage`)
+-   **ホスティング:** Supabase (Functions, Database)
+-   **クレデンシャル管理:** Supabase Secrets
+
+## 4. コーディング規約・方針
+
+-   **言語標準:** Deno標準ライブラリと`fetch` APIを可能な限り利用します。外部ライブラリは最小限に留めます（例: `supabase-js`, `openai` SDK は利用可）。
+-   **型定義:** TypeScriptの型を積極的に活用し、堅牢性を高めます。any型の使用は極力避けてください。
+-   **エラーハンドリング:**
+    -   主要な処理（API呼び出し、DBアクセス等）は `try...catch` で囲み、エラーを捕捉します。
+    -   捕捉したエラーは、専用のエラー通知用Slackチャンネルに詳細情報（発生箇所、エラーメッセージ、タイムスタンプ等）を送信します。
+    -   エラー発生時も可能な限り他のリクエスト処理に影響を与えないようにします（Functionがクラッシュしないように）。
+    -   ユーザーへのレスポンスは、原則として早期に `200 OK` を返し、バックグラウンドで非同期に処理を進めます（Slack通知など）。
+-   **環境変数:** OpenAI APIキー、Slack Bot Token/Webhook URL、Supabase関連情報、SlackチャンネルID等はSupabase Secretsで管理し、コード内には直接記述しません。Denoの `Deno.env.get()` を使用して読み込みます。
+-   **コードスタイル:** Deno標準のフォーマッタ (`deno fmt`)、リンター (`deno lint`) に準拠します。
+-   **シンプルさ:** 構成やコードは可能な限りシンプルに保ちます。複雑な抽象化は避け、処理の流れが追いやすいように記述します。
+
+## 5. ディレクトリ構成 (例)
+Use code with caution.
+Text
+supabase/
+├── functions/
+│ └── channelio-webhook-handler/
+│ ├── index.ts # メイン処理
+│ ├── utils.ts # 補助関数 (任意)
+│ └── types.ts # 型定義 (任意)
+├── config.toml # Supabase設定
+└── secrets.env # ローカル開発用環境変数 (Git管理外)
+
+## 6. 主要参照ドキュメント
+**実装にあたっては、以下のドキュメント群を主要な参照情報とし、必要に応じて内容を確認してください。**
+
+*   **Supabase Functions (Edge Functions):**
+    *   概要: https://supabase.com/docs/guides/functions
+    *   開発: https://supabase.com/docs/guides/functions/develop-locally
+    *   デプロイ: https://supabase.com/docs/guides/functions/deploy
+    *   環境変数 (Secrets): https://supabase.com/docs/guides/functions/secrets
+    *   Deno API: https://deno.land/api
+    *   非同期処理の完了保証 (`waitUntil`): Supabase Docs / Deno Deploy Docsを参照
+
+*   **Supabase JavaScript Client (`supabase-js`):**
+    *   概要・インストール: https://supabase.com/docs/reference/javascript/installing
+    *   クライアント初期化: https://supabase.com/docs/reference/javascript/initializing
+    *   データベース操作: https://supabase.com/docs/reference/javascript/select
+    *   RPC呼び出し: https://supabase.com/docs/reference/javascript/rpc
+
+*   **Supabase + pgvector:**
+    *   概要・ベクトル検索: https://supabase.com/docs/guides/ai/vector-embeddings
+
+*   **OpenAI API:**
+    *   APIリファレンス: https://platform.openai.com/docs/api-reference
+    *   Embeddings: https://platform.openai.com/docs/api-reference/embeddings
+    *   Chat Completions: https://platform.openai.com/docs/api-reference/chat
+    *   Node.js/TypeScript SDK: https://github.com/openai/openai-node
+
+*   **Slack API:**
+    *   Incoming Webhooks: https://api.slack.com/messaging/webhooks
+    *   `chat.postMessage` (Web API): https://api.slack.com/methods/chat.postMessage
+    *   メッセージ書式設定: https://api.slack.com/reference/surfaces/formatting
+
+## 7. その他
+-   READMEに必要なセットアップ手順や環境変数リストを記載してください。
+-   ベクトル検索のためのSupabase Function (RPC) は別途作成されている前提とします（もしなければ作成指示もPromptに含めます）。
+-   Channelio Webhookの署名検証が必要な場合は、そのロジックも実装してください（詳細仕様による）。
