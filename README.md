@@ -14,20 +14,20 @@ Channelioに届いた問い合わせに対して、FAQデータを元に自動�
 
 ```mermaid
 graph LR
-    A[LINE (ユーザー)] --> B(Channelio);
-    B --> C{Supabase Edge Functions<br>(channelio-webhook-handler)};
-    C --> D[Supabase Database<br>(documents + pgvector)];
-    C --> E[OpenAI API<br>(Embeddings)];
+    A["LINE (ユーザー)"] --> B("Channelio");
+    B --> C{"Supabase Edge Functions<br>(channelio-webhook-handler)"};
+    C --> D["Supabase Database<br>(documents + pgvector)"];
+    C --> E["OpenAI API<br>(Embeddings)"];
     D -- RAG --> C;
     E -- Vector --> C;
-    C --> F[OpenAI API<br>(GPT-3.5 etc)];
-    F -- 回答案 --> C;
-    C --> G[Slack (通知先)];
+    C --> F["OpenAI API<br>(GPT-3.5 etc)"];
+    F -- "回答案" --> C;
+    C --> G["Slack (通知先)"];
 
-    H[FAQ CSV] --> I(import_faq.ts<br>Denoスクリプト);
-    I --> J[OpenAI API<br>(Embeddings)];
+    H["FAQ CSV"] --> I("import_faq.ts<br>Denoスクリプト");
+    I --> J["OpenAI API<br>(Embeddings)"];
     J -- Vector --> I;
-    I --> K[Supabase Database<br>(documentsに格納)];
+    I --> K["Supabase Database<br>(documentsに格納)"];
 
 ```
 *Note: Mermaid diagrams might not render perfectly in all Markdown viewers.*
