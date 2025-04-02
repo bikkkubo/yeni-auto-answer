@@ -1,6 +1,8 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
+import { getLogilessOrderInfo, type LogilessOrderInfo } from "../_shared/logiless.ts";
+import { sendChannelioPrivateMessage } from "../_shared/channelio.ts";
 
 // --- 定数定義 ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
@@ -9,7 +11,12 @@ const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN");
 const SLACK_CHANNEL_ID = Deno.env.get("SLACK_CHANNEL_ID");
 const SLACK_ERROR_CHANNEL_ID = Deno.env.get("SLACK_ERROR_CHANNEL_ID");
-// const CHANNELIO_WEBHOOK_SECRET = Deno.env.get("CHANNELIO_WEBHOOK_SECRET"); // 署名検証用
+const LOGILESS_API_KEY = Deno.env.get("LOGILESS_API_KEY");
+const CHANNELIO_ACCESS_KEY = Deno.env.get("CHANNELIO_ACCESS_KEY");
+const CHANNELIO_ACCESS_SECRET = Deno.env.get("CHANNELIO_ACCESS_SECRET");
+
+// 注文番号抽出用の正規表現
+const ORDER_NUMBER_PATTERN = /(?:#)?yeni-\d+/i;
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 const COMPLETION_MODEL = "gpt-3.5-turbo";
@@ -141,27 +148,66 @@ async function notifyError(step: string, error: any, context: { query?: string; 
     }
 }
 
+// 注文番号抽出関数
+export function extractOrderNumber(text: string): string | null {
+    if (!text) return null;
+    const match = text.match(ORDER_NUMBER_PATTERN);
+    return match ? match[0].replace('#', '') : null;
+}
+
 // --- メイン処理関数 ---
-async function handleWebhook(payload: ChannelioWebhookPayload) {
+export async function handleWebhook(payload: ChannelioWebhookPayload) {
     // 正しい場所から情報を抽出
     const query = payload.entity?.plainText;
     const customerName = payload.refers?.user?.name;
     const chatLink = undefined; // ペイロードから直接取得できないため未設定
     const userId = payload.entity?.personId;
+    const chatId = payload.entity?.chatId;
 
     let step = "Initialization"; // 現在の処理ステップを追跡
+    let orderInfo: LogilessOrderInfo | null = null;
 
     try {
         // query の存在チェックを修正
         if (!query || typeof query !== 'string' || query.trim() === '') {
+            const error = new Error("Missing or invalid 'plainText' in request body entity.");
             console.error("Missing or invalid 'plainText' in request body entity:", payload);
-            // エラーを投げて Slack通知させる
-            throw new Error("Missing or invalid 'plainText' in request body entity.");
+            await notifyError(step, error, { query, userId });
+            throw error;
         }
 
         // 必須環境変数のチェック
-        if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_ANON_KEY || !SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID) {
-             throw new Error("Missing required environment variables. Please check Supabase Function Secrets.");
+        if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_ANON_KEY || !SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID || !LOGILESS_API_KEY || !CHANNELIO_ACCESS_KEY || !CHANNELIO_ACCESS_SECRET) {
+            const error = new Error("Missing required environment variables. Please check Supabase Function Secrets.");
+            await notifyError(step, error, { query, userId });
+            throw error;
+        }
+
+        // 注文番号の抽出
+        step = "OrderNumberExtraction";
+        const extractedOrderNumber = extractOrderNumber(query);
+        console.log(`[${step}] 抽出された注文番号: ${extractedOrderNumber ?? 'なし'}`);
+
+        // 注文情報の取得とプライベートメッセージの送信
+        if (extractedOrderNumber && chatId) {
+            step = "LogilessAPI";
+            console.log(`[${step}] Logiless APIを呼び出し中...`);
+            orderInfo = await getLogilessOrderInfo(extractedOrderNumber, LOGILESS_API_KEY);
+
+            if (orderInfo?.url) {
+                step = "ChannelioAPI";
+                console.log(`[${step}] Channel.io APIを呼び出し中...`);
+                const message = `注文情報が見つかりました。\n注文番号: ${extractedOrderNumber}\n注文ステータス: ${orderInfo.status ?? '不明'}\n注文詳細: ${orderInfo.url}`;
+                
+                const channelioAuth = {
+                    accessKey: CHANNELIO_ACCESS_KEY,
+                    accessSecret: CHANNELIO_ACCESS_SECRET,
+                };
+                const success = await sendChannelioPrivateMessage(chatId, message, channelioAuth);
+                if (!success) {
+                    console.error(`[${step}] プライベートメッセージの送信に失敗しました`);
+                }
+            }
         }
 
         const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -355,7 +401,7 @@ ${query}
             {
                 "type": "section",
                 "fields": [
-                    { "type": "mrkdwn", "text": `*顧客名:*\n${customerName || '不明'}` }, // undefined/null/空文字列の場合 '不明'
+                    { "type": "mrkdwn", "text": `*顧客名:*\n${customerName || '不明'}` },
                     { "type": "mrkdwn", "text": `*Channelioリンク:*\n${chatLink ? `<${chatLink}|リンクを開く>` : '不明'}` }
                 ]
             },
@@ -366,6 +412,13 @@ ${query}
                     "text": `*問い合わせ内容:*\n\`\`\`${query}\`\`\``
                 }
             },
+            ...(orderInfo?.url ? [{
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": `*注文情報:*\n注文番号: ${orderInfo.orderNumber}\n注文ステータス: ${orderInfo.status ?? '不明'}\n注文詳細: <${orderInfo.url}|Logilessで確認>`
+                }
+            }] : []),
             {
                 "type": "divider"
             },
@@ -388,6 +441,7 @@ ${query}
         // ここで notifyError を呼ぶことで、処理中のどのステップでエラーが起きても Slack に通知される
         await notifyError(step, error, { query, userId });
         // エラーが発生した場合、これ以上の処理は行わない
+        throw error;
     }
 }
 
