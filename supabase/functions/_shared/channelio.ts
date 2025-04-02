@@ -1,59 +1,42 @@
-export interface ChannelioMessageOptions {
-  personId?: string;
-  isPrivate?: boolean;
-}
-
-interface ChannelioAuth {
-  accessKey: string;
-  accessSecret: string;
-}
-
 export async function sendChannelioPrivateMessage(
   chatId: string,
   message: string,
-  auth: ChannelioAuth | undefined,
-  options: ChannelioMessageOptions = { isPrivate: true }
+  auth: { accessKey: string | undefined; accessSecret: string | undefined },
+  personId?: string
 ): Promise<boolean> {
   console.log(`[Channel.io] メッセージ送信開始 (Chat ID: ${chatId})`);
   
   if (!auth?.accessKey || !auth?.accessSecret) {
-    console.error("[Channel.io] 認証情報が不足しています");
+    console.error("[Channel.io] Access Key または Access Secret が不足しています");
     return false;
   }
 
   try {
-    // Basic認証用のトークンを生成
-    const authToken = btoa(`${auth.accessKey}:${auth.accessSecret}`);
-
     const response = await fetch(`https://api.channel.io/open/v5/user-chats/${chatId}/messages`, {
       method: 'POST',
       headers: {
-        'Authorization': `Basic ${authToken}`,
         'Content-Type': 'application/json',
+        'x-access-key': auth.accessKey,
+        'x-access-secret': auth.accessSecret,
       },
       body: JSON.stringify({
         message: message,
-        options: ["private"], // プライベートメッセージとして送信
-        personId: options.personId, // オプショナル
+        options: ["private"],
+        personId: personId,
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`API error: ${response.status} ${response.statusText}`);
+      const errorBody = await response.text();
+      console.error(`[Channel.io] APIエラー: ${response.status} ${response.statusText}`, errorBody);
+      return false;
     }
 
-    const data = await response.json();
-    
-    // レスポンスの検証
-    if (!data || typeof data !== 'object') {
-      throw new Error('Invalid API response format');
-    }
-
-    console.log(`[Channel.io] メッセージ送信成功: ${message}`);
+    console.log(`[Channel.io] プライベートメッセージ送信成功: ${message.substring(0, 50)}...`);
     return true;
 
   } catch (error) {
-    console.error(`[Channel.io] メッセージ送信エラー:`, error);
+    console.error(`[Channel.io] メッセージ送信中に予期せぬエラーが発生しました:`, error);
     return false;
   }
 } 

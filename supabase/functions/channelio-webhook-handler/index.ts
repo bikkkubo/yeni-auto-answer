@@ -14,6 +14,7 @@ const SLACK_ERROR_CHANNEL_ID = Deno.env.get("SLACK_ERROR_CHANNEL_ID");
 const LOGILESS_API_KEY = Deno.env.get("LOGILESS_API_KEY");
 const CHANNELIO_ACCESS_KEY = Deno.env.get("CHANNELIO_ACCESS_KEY");
 const CHANNELIO_ACCESS_SECRET = Deno.env.get("CHANNELIO_ACCESS_SECRET");
+const CHANNELIO_BOT_PERSON_ID = Deno.env.get("CHANNELIO_BOT_PERSON_ID"); // Fetch Bot Person ID
 
 // 注文番号抽出用の正規表現
 const ORDER_NUMBER_PATTERN = /(?:#)?yeni-\d+/i;
@@ -199,11 +200,11 @@ export async function handleWebhook(payload: ChannelioWebhookPayload) {
                 console.log(`[${step}] Channel.io APIを呼び出し中...`);
                 const message = `注文情報が見つかりました。\n注文番号: ${extractedOrderNumber}\n注文ステータス: ${orderInfo.status ?? '不明'}\n注文詳細: ${orderInfo.url}`;
                 
-                const channelioAuth = {
-                    accessKey: CHANNELIO_ACCESS_KEY,
-                    accessSecret: CHANNELIO_ACCESS_SECRET,
-                };
-                const success = await sendChannelioPrivateMessage(chatId, message, channelioAuth);
+                const success = await sendChannelioPrivateMessage(
+                    chatId, 
+                    message, 
+                    { accessKey: CHANNELIO_ACCESS_KEY, accessSecret: CHANNELIO_ACCESS_SECRET }
+                );
                 if (!success) {
                     console.error(`[${step}] プライベートメッセージの送信に失敗しました`);
                 }
@@ -386,7 +387,38 @@ ${query}
         }
         console.log(`[${step}] AI response generated successfully.`);
 
-        // 7. Slack通知 (オペレーター確認用)
+        // 7. Channel.ioへAI回答案をプライベートメッセージとして投稿 (Phase 2)
+        step = "ChannelioDraftPost";
+        if (chatId && CHANNELIO_ACCESS_KEY && CHANNELIO_ACCESS_SECRET) {
+            console.log(`[${step}] Posting AI draft to Channel.io chat ${chatId}...`);
+            try {
+                const messageToChannelio = `【AI回答案】\n${aiResponse}`;
+                const postSuccess = await sendChannelioPrivateMessage(
+                    chatId,
+                    messageToChannelio,
+                    { accessKey: CHANNELIO_ACCESS_KEY, accessSecret: CHANNELIO_ACCESS_SECRET }, 
+                    CHANNELIO_BOT_PERSON_ID // Pass the optional Bot Person ID
+                );
+                if (postSuccess) {
+                    console.log(`[${step}] AI回答案をプライベートメッセージとして正常に投稿しました。`);
+                } else {
+                    // Don't throw error here, just log a warning, error might be logged in the helper
+                    console.warn(`[${step}] AI回答案のプライベートメッセージ投稿に失敗しました (詳細ログはヘルパー関数内を確認)。`);
+                    // Optionally notify error channel if needed, but avoid duplicate notifications if helper already logs/notifies
+                    // await notifyError(step, new Error("Failed to post AI draft to Channel.io"), { query, userId });
+                }
+            } catch (postError) {
+                 // Catch errors specifically from the posting step
+                 console.error(`[${step}] Error posting AI draft to Channel.io:`, postError);
+                 // Notify error here as it's an unexpected exception during the call
+                 await notifyError(step, postError, { query, userId });
+                 // Depending on requirements, you might want to continue or re-throw
+            }
+        } else {
+            console.warn(`[${step}] Skipping Channel.io post due to missing chatId (${chatId}), Access Key (${!CHANNELIO_ACCESS_KEY}) or Access Secret (${!CHANNELIO_ACCESS_SECRET}).`);
+        }
+
+        // 8. Slack通知 (オペレーター確認用) - Renumbered from 7
         step = "SlackNotify";
         console.log(`[${step}] Sending notification to Slack channel ${SLACK_CHANNEL_ID}...`);
         const blocks = [
@@ -437,7 +469,7 @@ ${query}
 
     } catch (error) {
         console.error(`Error during step ${step}:`, error);
-        // 8. エラーハンドリングと通知
+        // 9. エラーハンドリングと通知 - Renumbered from 8
         // ここで notifyError を呼ぶことで、処理中のどのステップでエラーが起きても Slack に通知される
         await notifyError(step, error, { query, userId });
         // エラーが発生した場合、これ以上の処理は行わない
