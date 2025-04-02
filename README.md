@@ -1,36 +1,168 @@
-# yeni-auto-answer
+# yeni-auto-v2
 
-Channelioに届いた問い合わせに対して、FAQデータを元に自動回答案を生成するシステムです。ユーザーからのLINEメッセージがChannelioを経由して届くと、OpenAIのAPIを使って関連するFAQ情報を検索し、適切な回答案を生成してSlackに通知します。
+Channel.io からの問い合わせに対し、注文情報連携とAIによる回答案生成を行うSupabase Edge Functionです。
 
 ## 概要
 
-このプロジェクトは以下の機能を提供します：
+このプロジェクトは、Channel.io の Webhook をトリガーとして起動する Supabase Edge Function です。主な目的は、顧客からの問い合わせに含まれる注文番号を基に外部システム（Logiless）から注文情報を取得し、オペレーターの対応を支援すること、および OpenAI を利用して問い合わせに対する回答案を自動生成することです。
 
-1. **顧客問い合わせの自動応答案生成**：顧客からLINE経由で来た問い合わせに対し、事前に登録したFAQやナレッジベースを活用して回答案を自動生成
-2. **オペレーター支援**：生成された回答案はSlackに送信され、オペレーターが確認・活用できる
-3. **FAQ管理**：CSVファイルからFAQデータをベクトル化してデータベースに格納
+## 機能
 
-## システム構成
+-   Channel.io Webhook の受信と処理
+-   メッセージからの注文番号抽出 (例: `yeni-12345`)
+-   Logiless API を利用した注文情報の取得 (注文ステータス, 詳細URLなど)
+-   取得した注文情報を Channel.io の該当チャットへプライベートメッセージとして送信
+-   OpenAI Embeddings API と Supabase pgvector を利用した関連ドキュメントのベクトル検索 (RAG - Retrieval)
+-   OpenAI Chat Completions API を利用した回答案の生成 (RAG - Generation)
+-   問い合わせ内容、Logiless情報、AI回答案を Slack へ通知
+-   処理中のエラーを Slack のエラーチャンネルへ通知
+
+## アーキテクチャ概要
 
 ```mermaid
 graph LR
-    A["LINE (ユーザー)"] --> B("Channelio");
-    B --> C{"Supabase Edge Functions<br>(channelio-webhook-handler)"};
-    C --> D["Supabase Database<br>(documents + pgvector)"];
-    C --> E["OpenAI API<br>(Embeddings)"];
-    D -- RAG --> C;
-    E -- Vector --> C;
-    C --> F["OpenAI API<br>(GPT-3.5 etc)"];
-    F -- "回答案" --> C;
-    C --> G["Slack (通知先)"];
-
-    H["FAQ CSV"] --> I("import_faq.ts<br>Denoスクリプト");
-    I --> J["OpenAI API<br>(Embeddings)"];
-    J -- Vector --> I;
-    I --> K["Supabase Database<br>(documentsに格納)"];
-
+    A[Channel.io Webhook] --> B(Supabase Edge Function: channelio-webhook-handler);
+    B -- 注文番号 --> C{Logiless API};
+    C -- 注文情報 --> B;
+    B -- プライベートメッセージ --> D[Channel.io API];
+    B -- クエリ --> E{OpenAI Embeddings API};
+    E -- Embedding --> B;
+    B -- Embedding --> F[Supabase DB (pgvector)];
+    F -- 関連文書 --> B;
+    B -- プロンプト --> G{OpenAI Chat Completions API};
+    G -- 回答案 --> B;
+    B -- 通知 --> H[Slack API];
 ```
-*Note: Mermaid diagrams might not render perfectly in all Markdown viewers.*
+
+## セットアップ
+
+### 1. 前提条件
+
+-   Node.js と npm (または yarn)
+-   Deno
+-   Supabase CLI: `npm install -g supabase`
+-   Supabase アカウントとプロジェクト
+-   各種 API キー (OpenAI, Slack, Channel.io, Logiless)
+
+### 2. リポジトリのクローン
+
+```bash
+git clone https://github.com/bikkkubo/yeni-auto-v2.git
+cd yeni-auto-v2
+```
+
+### 3. Supabase プロジェクトとの連携
+
+```bash
+supabase login
+supabase link --project-ref <your-project-ref> # プロジェクトIDをSupabaseダッシュボードで確認
+```
+
+### 4. データベースの準備
+
+Supabase ダッシュボードの SQL Editor を使用して、以下の設定を行います。
+
+1.  **pgvector 拡張機能の有効化:**
+    ```sql
+    CREATE EXTENSION IF NOT EXISTS vector;
+    ```
+2.  **documents テーブルの作成:** (ベクトルとメタデータを格納)
+    ```sql
+    -- 以前のチャット履歴や、提供されたSQLを参照してテーブルを作成してください
+    CREATE TABLE documents (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      content TEXT NOT NULL,
+      question TEXT,
+      source_type TEXT NOT NULL,
+      embedding VECTOR(1536) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    -- 必要に応じて updated_at トリガーも作成
+    ```
+3.  **match_documents 関数の作成:** (ベクトル検索用)
+    ```sql
+    -- 以前のチャット履歴や、提供されたSQLを参照して関数を作成してください
+    create or replace function match_documents (
+      query_embedding vector(1536),
+      match_threshold float,
+      match_count int
+    )
+    returns table (...)
+    language sql stable
+    as $$
+      -- 関数の本体を記述
+    $$;
+    ```
+
+### 5. 環境変数の設定
+
+プロジェクトルートに `.env.local` ファイルを作成し、以下の環境変数を設定します。`.env.example` ファイルがあれば、それをコピーして使用してください。
+
+```dotenv
+# Supabase (通常は自動リンクされるが、確認用)
+# SUPABASE_URL=your_supabase_url
+# SUPABASE_ANON_KEY=your_supabase_anon_key
+
+# OpenAI
+OPENAI_API_KEY=sk-...
+
+# Slack
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_CHANNEL_ID=C...
+SLACK_ERROR_CHANNEL_ID=C...
+
+# Channel.io
+CHANNELIO_ACCESS_KEY=...
+CHANNELIO_ACCESS_SECRET=...
+# CHANNELIO_WEBHOOK_SECRET=... # (Optional, if webhook signature verification is implemented)
+
+# Logiless
+LOGILESS_API_KEY=...
+```
+
+設定後、Supabase Secrets に反映させます。
+
+```bash
+supabase secrets set --env-file .env.local
+```
+
+### 6. Edge Function のデプロイ
+
+```bash
+supabase functions deploy channelio-webhook-handler --no-verify-jwt
+```
+
+## ローカル開発
+
+### テストの実行
+
+```bash
+cd supabase/tests
+deno test --allow-read --allow-net --allow-env
+```
+
+### ローカルサーバーの起動
+
+Docker が必要です。`.env.local` の環境変数を読み込ませて実行します。
+
+```bash
+supabase start # データベースなどをローカルで起動
+supabase functions serve --env-file .env.local --no-verify-jwt
+```
+
+## API連携
+
+-   **Logiless API:** 注文番号を基に注文詳細を取得します。APIキーが必要です。
+-   **Channel.io API:** 注文情報をプライベートメッセージとして送信します。Access Key/Secretが必要です。
+-   **OpenAI API:** Embedding生成とChat Completionに使用します。APIキーが必要です。
+-   **Slack API:** 通知の送信に使用します。Bot Tokenが必要です。
+
+## 注意点
+
+-   APIキーは `.env.local` に記述し、Git にはコミットせず、`supabase secrets` で管理してください。
+-   データベースのセットアップ（拡張機能、テーブル、関数）が正しく行われていることを確認してください。
+-   (未実装) Channel.io Webhook の署名検証を実装することで、セキュリティを向上できます。
 
 ## 主要コンポーネント
 
