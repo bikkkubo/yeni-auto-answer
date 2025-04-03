@@ -11,7 +11,7 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN");
 const SLACK_CHANNEL_ID = Deno.env.get("SLACK_CHANNEL_ID");
 const SLACK_ERROR_CHANNEL_ID = Deno.env.get("SLACK_ERROR_CHANNEL_ID");
-const LOGILESS_API_KEY = Deno.env.get("LOGILESS_API_KEY");
+// const LOGILESS_API_KEY = Deno.env.get("LOGILESS_API_KEY"); // 未実装のためコメントアウト
 const CHANNELIO_ACCESS_KEY = Deno.env.get("CHANNELIO_ACCESS_KEY");
 const CHANNELIO_ACCESS_SECRET = Deno.env.get("CHANNELIO_ACCESS_SECRET");
 const CHANNELIO_BOT_PERSON_ID = Deno.env.get("CHANNELIO_BOT_PERSON_ID"); // Fetch Bot Person ID
@@ -393,23 +393,21 @@ export async function handleWebhook(payload: ChannelioWebhookPayload) {
         }
 
         // 必須環境変数のチェック
-        // --- デバッグログ追加 ---
-        console.log(`Checking env vars before validation: LOGILESS_API_KEY=${Deno.env.get("LOGILESS_API_KEY")}, CHANNELIO_ACCESS_KEY=${Deno.env.get("CHANNELIO_ACCESS_KEY")}, CHANNELIO_ACCESS_SECRET=${Deno.env.get("CHANNELIO_ACCESS_SECRET")}`);
-        // --- デバッグログ追加ここまで ---
-        if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID || !LOGILESS_API_KEY || !CHANNELIO_ACCESS_KEY || !CHANNELIO_ACCESS_SECRET) {
+        // LOGILESS_API_KEY をチェックから除外
+        if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID || !CHANNELIO_ACCESS_KEY || !CHANNELIO_ACCESS_SECRET) { 
             const missingVars = [
                 !OPENAI_API_KEY && "OPENAI_API_KEY",
                 !SUPABASE_URL && "SUPABASE_URL",
-                !SUPABASE_SERVICE_ROLE_KEY && "SUPABASE_SERVICE_ROLE_KEY", // Check for service role key
+                !SUPABASE_SERVICE_ROLE_KEY && "SUPABASE_SERVICE_ROLE_KEY",
                 !SLACK_BOT_TOKEN && "SLACK_BOT_TOKEN",
                 !SLACK_CHANNEL_ID && "SLACK_CHANNEL_ID",
                 !SLACK_ERROR_CHANNEL_ID && "SLACK_ERROR_CHANNEL_ID",
-                !LOGILESS_API_KEY && "LOGILESS_API_KEY",
+                // !LOGILESS_API_KEY && "LOGILESS_API_KEY", // チェックから除外
                 !CHANNELIO_ACCESS_KEY && "CHANNELIO_ACCESS_KEY",
                 !CHANNELIO_ACCESS_SECRET && "CHANNELIO_ACCESS_SECRET",
             ].filter(Boolean).join(", ");
             const error = new Error(`Missing required environment variables: ${missingVars}. Please check Supabase Function Secrets.`);
-            await notifyError(step, error, { query, userId: channelioChatId }); // userIdとしてchatIdを使用
+            await notifyError(step, error, { query, userId: channelioChatId });
             throw error;
         }
 
@@ -418,27 +416,33 @@ export async function handleWebhook(payload: ChannelioWebhookPayload) {
         const extractedOrderNumber = extractOrderNumber(query);
         console.log(`[${step}] 抽出された注文番号: ${extractedOrderNumber ?? 'なし'}`);
 
-        // 注文情報の取得とプライベートメッセージの送信
+        // 注文情報の取得とプライベートメッセージの送信 - LOGILESS_API_KEY関連をコメントアウト
+        /* // LOGILESS未実装のため全体をコメントアウト
         if (extractedOrderNumber && channelioChatId) {
             step = "LogilessAPI";
             console.log(`[${step}] Logiless APIを呼び出し中...`);
-            orderInfo = await getLogilessOrderInfo(extractedOrderNumber, LOGILESS_API_KEY);
-
-            if (orderInfo?.url) {
-                step = "ChannelioAPI";
-                console.log(`[${step}] Channel.io APIを呼び出し中...`);
-                const message = `注文情報が見つかりました。\n注文番号: ${extractedOrderNumber}\n注文ステータス: ${orderInfo.status ?? '不明'}\n注文詳細: ${orderInfo.url}`;
-                
-                const success = await sendChannelioPrivateMessage(
-                    channelioChatId, 
-                    message, 
-                    { accessKey: CHANNELIO_ACCESS_KEY, accessSecret: CHANNELIO_ACCESS_SECRET }
-                );
-                if (!success) {
-                    console.error(`[${step}] プライベートメッセージの送信に失敗しました`);
-                }
-            }
+            // orderInfo = await getLogilessOrderInfo(extractedOrderNumber, LOGILESS_API_KEY);
+             if (!LOGILESS_API_KEY) { // キーがない場合はスキップするログを追加
+                 console.warn(`[${step}] LOGILESS_API_KEY is not set. Skipping Logiless API call.`);
+             } else {
+                 orderInfo = await getLogilessOrderInfo(extractedOrderNumber, LOGILESS_API_KEY);
+                 if (orderInfo?.url) {
+                     step = "ChannelioAPI";
+                     console.log(`[${step}] Channel.io APIを呼び出し中...`);
+                     const message = `注文情報が見つかりました。\n注文番号: ${extractedOrderNumber}\n注文ステータス: ${orderInfo.status ?? '不明'}\n注文詳細: ${orderInfo.url}`;
+                     
+                     const success = await sendChannelioPrivateMessage(
+                         channelioChatId, 
+                         message, 
+                         { accessKey: CHANNELIO_ACCESS_KEY, accessSecret: CHANNELIO_ACCESS_SECRET }
+                     );
+                     if (!success) {
+                         console.error(`[${step}] プライベートメッセージの送信に失敗しました`);
+                     }
+                 }
+             }
         }
+        */ // LOGILESS未実装コメントアウトここまで
 
         // --- ここから変更: 既存スレッドの確認 ---
         step = "CheckExistingThread";
@@ -630,6 +634,7 @@ ${query}
 
         // 7. Channel.ioへAI回答案をプライベートメッセージとして投稿 (Phase 2)
         step = "ChannelioDraftPost";
+        // 処理ブロックの前に、必要なキーの存在を再確認（より安全に）
         if (channelioChatId && CHANNELIO_ACCESS_KEY && CHANNELIO_ACCESS_SECRET) {
             console.log(`[${step}] Posting AI draft to Channel.io chat ${channelioChatId}...`);
             try {
