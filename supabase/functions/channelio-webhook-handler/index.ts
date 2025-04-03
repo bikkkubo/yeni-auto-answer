@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
 import { getLogilessOrderInfo, type LogilessOrderInfo } from "../_shared/logiless.ts";
 import { sendChannelioPrivateMessage } from "../_shared/channelio.ts";
@@ -7,7 +7,7 @@ import { sendChannelioPrivateMessage } from "../_shared/channelio.ts";
 // --- 定数定義 ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN");
 const SLACK_CHANNEL_ID = Deno.env.get("SLACK_CHANNEL_ID");
 const SLACK_ERROR_CHANNEL_ID = Deno.env.get("SLACK_ERROR_CHANNEL_ID");
@@ -15,6 +15,7 @@ const LOGILESS_API_KEY = Deno.env.get("LOGILESS_API_KEY");
 const CHANNELIO_ACCESS_KEY = Deno.env.get("CHANNELIO_ACCESS_KEY");
 const CHANNELIO_ACCESS_SECRET = Deno.env.get("CHANNELIO_ACCESS_SECRET");
 const CHANNELIO_BOT_PERSON_ID = Deno.env.get("CHANNELIO_BOT_PERSON_ID"); // Fetch Bot Person ID
+const SLACK_THREAD_EXPIRY_HOURS = 48; // Slackスレッドの有効時間（時間）
 
 // 注文番号抽出用の正規表現
 const ORDER_NUMBER_PATTERN = /(?:#)?yeni-\d+/i;
@@ -25,28 +26,66 @@ const MATCH_THRESHOLD = 0.7; // ベクトル検索の類似度閾値 (調整可�
 const MATCH_COUNT = 3; // ベクトル検索の取得件数
 const RPC_FUNCTION_NAME = "match_documents"; // SupabaseのRPC関数名
 
+// --- Supabase クライアント初期化 ---
+// SERVICE_ROLE_KEY が必要
+let supabase: SupabaseClient;
+if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+    supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+        // RLSをバイパスする場合や、サーバーサイドでの操作にはSERVICE_ROLE_KEYが適している
+        // 必要に応じてオプションを追加
+        auth: {
+             persistSession: false, // サーバーサイドではセッション永続化不要
+             autoRefreshToken: false,
+        }
+    });
+    console.log("Supabase client initialized with Service Role Key.");
+} else {
+    console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY. Supabase client could not be initialized.");
+    // 起動時にエラーにするか、フォールバック処理を行うか検討
+    // throw new Error("Missing Supabase credentials.");
+}
+
 // --- 型定義 ---
 interface ChannelioEntity {
     plainText: string;
     personId?: string;
+    personType?: 'user' | 'manager' | 'bot';
     chatId?: string;
+    id?: string;
     // 他に必要なentity内のフィールドがあれば追加
 }
 
+interface ChannelioUserChat {
+    id: string;
+    state?: 'opened' | 'closed';
+    userId?: string;
+    // 他に必要なuserChat内のフィールドがあれば追加
+}
+
 interface ChannelioUser {
+    id: string;
     name?: string;
     // 他に必要なuser内のフィールドがあれば追加
 }
 
 interface ChannelioRefers {
+    userChat?: ChannelioUserChat;
     user?: ChannelioUser;
-    // userChatなど、他に必要なrefers内のオブジェクトがあれば追加
+    // 他に必要なrefers内のオブジェクトがあれば追加
 }
 
 interface ChannelioWebhookPayload {
     entity: ChannelioEntity;
     refers?: ChannelioRefers;
-    // eventなど、他のトップレベルフィールドがあれば追加
+    event?: string;
+    type?: string;
+    // 他のトップレベルフィールドがあれば追加
+}
+
+interface SlackThreadInfo {
+  channelio_chat_id: string;
+  slack_thread_ts: string;
+  expires_at: string; // ISO 8601 format
 }
 
 interface Document {
@@ -56,12 +95,110 @@ interface Document {
     // 他のフィールドがあれば追加
 }
 
+// --- Slack Thread Store 操作関数 (Supabase) ---
+
+/**
+ * 指定されたChannel.ioチャットIDに紐づく、有効期限内のSlackスレッドタイムスタンプを取得する
+ * @param chatId Channel.ioのチャットID (userChat.id または entity.chatId)
+ * @returns 有効なタイムスタンプ(string)、見つからない/期限切れの場合はnull
+ */
+async function getActiveThreadTs(chatId: string): Promise<string | null> {
+  if (!supabase) {
+    console.error("Supabase client is not initialized. Cannot get thread ts.");
+    return null;
+  }
+  try {
+      const { data, error } = await supabase
+        .from('slack_thread_store')
+        .select('slack_thread_ts')
+        .eq('channelio_chat_id', chatId)
+        .gt('expires_at', new Date().toISOString()) // 有効期限をチェック
+        .maybeSingle(); // 結果が1件または0件の場合に対応
+
+      if (error) {
+        // PGRST116は 'No rows found' なので無視してよい
+        if (error.code !== 'PGRST116') {
+            console.error(`Error fetching thread ts for chatId ${chatId}:`, error);
+             await notifyError("GetActiveThreadTs", error, { userId: chatId }); // エラー通知
+        }
+        return null; // エラーの場合もnullを返す
+      }
+      return data?.slack_thread_ts ?? null;
+
+  } catch (e) {
+      console.error(`Unexpected error in getActiveThreadTs for chatId ${chatId}:`, e);
+      await notifyError("GetActiveThreadTs Unexpected", e, { userId: chatId });
+      return null;
+  }
+}
+
+/**
+ * Channel.ioチャットIDとSlackスレッドタイムスタンプを有効期限付きで保存（または更新）する
+ * @param chatId Channel.ioのチャットID
+ * @param threadTs 保存するSlackスレッドタイムスタンプ
+ */
+async function saveThreadTs(chatId: string, threadTs: string): Promise<void> {
+  if (!supabase) {
+    console.error("Supabase client is not initialized. Cannot save thread ts.");
+    return;
+  }
+  try {
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + SLACK_THREAD_EXPIRY_HOURS);
+
+      const { error } = await supabase
+        .from('slack_thread_store')
+        .upsert({
+          channelio_chat_id: chatId,
+          slack_thread_ts: threadTs,
+          expires_at: expiresAt.toISOString(),
+        }, { onConflict: 'channelio_chat_id' }); // channelio_chat_id が重複したら更新
+
+      if (error) {
+        console.error(`Error saving thread ts for chatId ${chatId}:`, error);
+        await notifyError("SaveThreadTs", error, { userId: chatId });
+      } else {
+        console.log(`Saved/Updated thread ts ${threadTs} for chatId ${chatId}`);
+      }
+  } catch (e) {
+       console.error(`Unexpected error in saveThreadTs for chatId ${chatId}:`, e);
+       await notifyError("SaveThreadTs Unexpected", e, { userId: chatId });
+  }
+}
+
+/**
+ * (任意) 指定されたChannel.ioチャットIDに紐づくスレッド情報を削除する
+ * @param chatId Channel.ioのチャットID
+ */
+async function deleteThreadTs(chatId: string): Promise<void> {
+    if (!supabase) {
+        console.error("Supabase client is not initialized. Cannot delete thread ts.");
+        return;
+    }
+    try {
+        const { error } = await supabase
+            .from('slack_thread_store')
+            .delete()
+            .eq('channelio_chat_id', chatId);
+
+        if (error) {
+            console.error(`Error deleting thread ts for chatId ${chatId}:`, error);
+             await notifyError("DeleteThreadTs", error, { userId: chatId });
+        } else {
+             console.log(`Deleted thread ts mapping for chatId ${chatId}`);
+        }
+    } catch (e) {
+        console.error(`Unexpected error in deleteThreadTs for chatId ${chatId}:`, e);
+        await notifyError("DeleteThreadTs Unexpected", e, { userId: chatId });
+    }
+}
+
 // --- ヘルパー関数: Slack通知 ---
-async function postToSlack(channel: string, text: string, blocks?: any[]) {
+async function postToSlack(channel: string, text: string, blocks?: any[], threadTs?: string): Promise<string | undefined> {
     if (!SLACK_BOT_TOKEN) {
         console.error("SLACK_BOT_TOKEN is not set.");
         // エラー通知チャンネルにも通知できない可能性があるため、コンソール出力に留める
-        return;
+        return undefined;
     }
     try {
         const payload: { channel: string; text: string; blocks?: any[] } = {
@@ -70,6 +207,11 @@ async function postToSlack(channel: string, text: string, blocks?: any[]) {
         };
         if (blocks) {
             payload.blocks = blocks;
+        }
+
+        // threadTs が指定されていれば、ペイロードに追加
+        if (threadTs) {
+            (payload as any).thread_ts = threadTs; // Slack APIの型に合わせて追加
         }
 
         const response = await fetch("https://slack.com/api/chat.postMessage", {
@@ -85,14 +227,23 @@ async function postToSlack(channel: string, text: string, blocks?: any[]) {
             const errorData = await response.json();
             console.error(`Failed to post message to Slack channel ${channel}: ${response.status} ${response.statusText}`, errorData);
             // ここでさらにエラー通知を試みることもできるが、ループを防ぐため注意
+            return undefined; // エラー時はundefinedを返す
         } else {
             const data = await response.json();
             if (!data.ok) {
                  console.error(`Slack API Error: ${data.error}`);
+                 return undefined; // エラー時はundefinedを返す
+            } else {
+                 // 成功した場合、メッセージのタイムスタンプ(ts)を返す
+                 console.log(`Message posted successfully to ${channel}${threadTs ? ` (thread: ${threadTs})` : ''}. ts: ${data.ts}`);
+                 return data.ts as string;
             }
         }
     } catch (error) {
         console.error(`Error posting to Slack channel ${channel}:`, error);
+        // ここでエラー通知を呼ぶことも検討
+        await notifyError("PostToSlack", error, { userId: `Channel: ${channel}` });
+        return undefined; // エラー時はundefinedを返す
     }
 }
 
@@ -158,29 +309,107 @@ export function extractOrderNumber(text: string): string | null {
 
 // --- メイン処理関数 ---
 export async function handleWebhook(payload: ChannelioWebhookPayload) {
-    // 正しい場所から情報を抽出
+    // --- デバッグ用ログ追加 ---
+    console.log(`Received webhook. Event: ${payload.event}, Type: ${payload.type}, Entity PersonType: ${payload.entity?.personType}, PersonId: ${payload.entity?.personId}, ChatId: ${payload.entity?.chatId}`);
+    // --- デバッグ用ログここまで ---
+
+    // 正しい場所から情報を抽出 - chatIdの抽出元を明確にする
     const query = payload.entity?.plainText;
     const customerName = payload.refers?.user?.name;
-    const chatLink = undefined; // ペイロードから直接取得できないため未設定
-    const userId = payload.entity?.personId;
-    const chatId = payload.entity?.chatId;
+    // Channelioのチャットへのリンクはペイロードから直接生成は難しいことが多い
+    // 例: const chatLink = `https://<your-channelio-domain>.channel.io/user-chats/${payload.refers?.userChat?.id}`;
+    const chatLink = undefined; // 必要ならドメイン等を設定して生成
+    const senderPersonId = payload.entity?.personId;
+    const senderPersonType = payload.entity?.personType;
+    const channelioChatId = payload.entity?.chatId;
 
     let step = "Initialization"; // 現在の処理ステップを追跡
     let orderInfo: LogilessOrderInfo | null = null;
 
     try {
+        // --- Botメッセージの早期処理 ---
+        if (senderPersonType === 'bot') {
+            step = "HandleBotMessage";
+            // --- デバッグ用ログ追加 ---
+            console.log(`[${step}] Condition senderPersonType === 'bot' is TRUE. Entering bot handling block.`);
+            // --- デバッグ用ログここまで ---
+            console.log(`[${step}] Received message from bot (${senderPersonId}). Skipping AI processing.`);
+
+            if (!channelioChatId) {
+                console.warn(`[${step}] Missing chatId for bot message. Cannot post to thread.`);
+                return; // chatIdがないとスレッド投稿できない
+            }
+            if (!query) {
+                console.warn(`[${step}] Missing plainText for bot message.`);
+                return; // メッセージ内容がない
+            }
+
+            // 既存のスレッドを探す
+            const existingThreadTs = await getActiveThreadTs(channelioChatId);
+
+            if (!existingThreadTs) {
+                // botからのメッセージがスレッドの起点になることは通常想定しない
+                // もしスレッドが存在しない場合、botメッセージは無視するか、エラー通知するか検討
+                console.warn(`[${step}] No active thread found for chatId ${channelioChatId}. Ignoring bot message.`);
+                return;
+            }
+
+            // Slackにbotのメッセージを投稿
+            const botMessageText = `[Bot]: ${query}`;
+            const fallbackText = `[Bot]: ${query.substring(0, 50)}...`;
+            const postedTs = await postToSlack(SLACK_CHANNEL_ID, fallbackText, [{ type: "section", text: { type: "mrkdwn", text: botMessageText } }], existingThreadTs);
+
+            if (postedTs) {
+                console.log(`[${step}] Posted bot message to thread ${existingThreadTs}`);
+                // スレッドの有効期限を更新
+                await saveThreadTs(channelioChatId, existingThreadTs);
+            }
+
+            // --- デバッグ用ログ追加 ---
+            console.log(`[${step}] Finishing bot handling block. Returning early.`);
+            // --- デバッグ用ログここまで ---
+            // botメッセージの処理はここで完了
+            return;
+        }
+        // --- Botメッセージ処理ここまで ---
+
+        // --- 以下、ユーザー/マネージャーからのメッセージ処理 ---
+        step = "HandleUserMessage"; // ステップ名を変更
+
+        // channelioChatId の存在チェックを追加
+        if (!channelioChatId) {
+            console.warn("Missing 'entity.chatId' in payload. Cannot manage thread.", payload);
+            // スレッド管理できないが、通知自体は試みるか、エラーにするか検討。
+            // ここでは警告ログのみとし、処理を続ける (スレッド化はされない)
+            // return; // もしchatIdがない場合は処理を中断するならコメント解除
+        }
+
         // query の存在チェックを修正
         if (!query || typeof query !== 'string' || query.trim() === '') {
             const error = new Error("Missing or invalid 'plainText' in request body entity.");
             console.error("Missing or invalid 'plainText' in request body entity:", payload);
-            await notifyError(step, error, { query, userId });
+            await notifyError(step, error, { query, userId: channelioChatId });
             throw error;
         }
 
         // 必須環境変数のチェック
-        if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_ANON_KEY || !SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID || !LOGILESS_API_KEY || !CHANNELIO_ACCESS_KEY || !CHANNELIO_ACCESS_SECRET) {
-            const error = new Error("Missing required environment variables. Please check Supabase Function Secrets.");
-            await notifyError(step, error, { query, userId });
+        // --- デバッグログ追加 ---
+        console.log(`Checking env vars before validation: LOGILESS_API_KEY=${Deno.env.get("LOGILESS_API_KEY")}, CHANNELIO_ACCESS_KEY=${Deno.env.get("CHANNELIO_ACCESS_KEY")}, CHANNELIO_ACCESS_SECRET=${Deno.env.get("CHANNELIO_ACCESS_SECRET")}`);
+        // --- デバッグログ追加ここまで ---
+        if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID || !LOGILESS_API_KEY || !CHANNELIO_ACCESS_KEY || !CHANNELIO_ACCESS_SECRET) {
+            const missingVars = [
+                !OPENAI_API_KEY && "OPENAI_API_KEY",
+                !SUPABASE_URL && "SUPABASE_URL",
+                !SUPABASE_SERVICE_ROLE_KEY && "SUPABASE_SERVICE_ROLE_KEY", // Check for service role key
+                !SLACK_BOT_TOKEN && "SLACK_BOT_TOKEN",
+                !SLACK_CHANNEL_ID && "SLACK_CHANNEL_ID",
+                !SLACK_ERROR_CHANNEL_ID && "SLACK_ERROR_CHANNEL_ID",
+                !LOGILESS_API_KEY && "LOGILESS_API_KEY",
+                !CHANNELIO_ACCESS_KEY && "CHANNELIO_ACCESS_KEY",
+                !CHANNELIO_ACCESS_SECRET && "CHANNELIO_ACCESS_SECRET",
+            ].filter(Boolean).join(", ");
+            const error = new Error(`Missing required environment variables: ${missingVars}. Please check Supabase Function Secrets.`);
+            await notifyError(step, error, { query, userId: channelioChatId }); // userIdとしてchatIdを使用
             throw error;
         }
 
@@ -190,7 +419,7 @@ export async function handleWebhook(payload: ChannelioWebhookPayload) {
         console.log(`[${step}] 抽出された注文番号: ${extractedOrderNumber ?? 'なし'}`);
 
         // 注文情報の取得とプライベートメッセージの送信
-        if (extractedOrderNumber && chatId) {
+        if (extractedOrderNumber && channelioChatId) {
             step = "LogilessAPI";
             console.log(`[${step}] Logiless APIを呼び出し中...`);
             orderInfo = await getLogilessOrderInfo(extractedOrderNumber, LOGILESS_API_KEY);
@@ -201,7 +430,7 @@ export async function handleWebhook(payload: ChannelioWebhookPayload) {
                 const message = `注文情報が見つかりました。\n注文番号: ${extractedOrderNumber}\n注文ステータス: ${orderInfo.status ?? '不明'}\n注文詳細: ${orderInfo.url}`;
                 
                 const success = await sendChannelioPrivateMessage(
-                    chatId, 
+                    channelioChatId, 
                     message, 
                     { accessKey: CHANNELIO_ACCESS_KEY, accessSecret: CHANNELIO_ACCESS_SECRET }
                 );
@@ -211,9 +440,21 @@ export async function handleWebhook(payload: ChannelioWebhookPayload) {
             }
         }
 
-        const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-            global: { headers: { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } },
-        });
+        // --- ここから変更: 既存スレッドの確認 ---
+        step = "CheckExistingThread";
+        let existingThreadTs: string | null = null;
+        if (channelioChatId) {
+             console.log(`[${step}] Checking for active thread for chatId: ${channelioChatId}...`);
+             existingThreadTs = await getActiveThreadTs(channelioChatId);
+             if (existingThreadTs) {
+                 console.log(`[${step}] Found active thread ts: ${existingThreadTs}`);
+             } else {
+                 console.log(`[${step}] No active thread found. A new thread will be started.`);
+             }
+        } else {
+            console.log(`[${step}] Skipping thread check due to missing chatId.`);
+        }
+        // --- ここまで変更 ---
 
         // 4. ベクトル化
         step = "Vectorization";
@@ -389,12 +630,12 @@ ${query}
 
         // 7. Channel.ioへAI回答案をプライベートメッセージとして投稿 (Phase 2)
         step = "ChannelioDraftPost";
-        if (chatId && CHANNELIO_ACCESS_KEY && CHANNELIO_ACCESS_SECRET) {
-            console.log(`[${step}] Posting AI draft to Channel.io chat ${chatId}...`);
+        if (channelioChatId && CHANNELIO_ACCESS_KEY && CHANNELIO_ACCESS_SECRET) {
+            console.log(`[${step}] Posting AI draft to Channel.io chat ${channelioChatId}...`);
             try {
                 const messageToChannelio = `【AI回答案】\n${aiResponse}`;
                 const postSuccess = await sendChannelioPrivateMessage(
-                    chatId,
+                    channelioChatId,
                     messageToChannelio,
                     { accessKey: CHANNELIO_ACCESS_KEY, accessSecret: CHANNELIO_ACCESS_SECRET }, 
                     CHANNELIO_BOT_PERSON_ID // Pass the optional Bot Person ID
@@ -411,11 +652,11 @@ ${query}
                  // Catch errors specifically from the posting step
                  console.error(`[${step}] Error posting AI draft to Channel.io:`, postError);
                  // Notify error here as it's an unexpected exception during the call
-                 await notifyError(step, postError, { query, userId });
+                 await notifyError(step, postError, { query, userId: channelioChatId });
                  // Depending on requirements, you might want to continue or re-throw
             }
         } else {
-            console.warn(`[${step}] Skipping Channel.io post due to missing chatId (${chatId}), Access Key (${!CHANNELIO_ACCESS_KEY}) or Access Secret (${!CHANNELIO_ACCESS_SECRET}).`);
+            console.warn(`[${step}] Skipping Channel.io post due to missing chatId (${channelioChatId}), Access Key (${!CHANNELIO_ACCESS_KEY}) or Access Secret (${!CHANNELIO_ACCESS_SECRET}).`);
         }
 
         // 8. Slack通知 (オペレーター確認用) - Renumbered from 7
@@ -464,14 +705,28 @@ ${query}
         ];
         const fallbackText = `新規問い合わせ: ${customerName ?? '不明'} - ${query.substring(0, 50)}...`;
 
-        await postToSlack(SLACK_CHANNEL_ID, fallbackText, blocks);
+        // --- ここから変更: postToSlackにthreadTsを渡し、戻り値のtsを保存 --- 
+        // 既存のスレッドTS (existingThreadTs) を postToSlack に渡す
+        const newTs = await postToSlack(SLACK_CHANNEL_ID, fallbackText, blocks, existingThreadTs ?? undefined);
+
+        // 新しいメッセージで、Slackへの投稿が成功した場合のみ、tsを保存/更新
+        if (!existingThreadTs && newTs && channelioChatId) {
+            console.log(`[${step}] Saving new thread ts ${newTs} for chatId ${channelioChatId}...`);
+            await saveThreadTs(channelioChatId, newTs);
+        } else if (existingThreadTs && newTs && channelioChatId) {
+            // オプション: 既存スレッドへの返信成功時にも有効期限を更新するならsaveを呼ぶ
+             console.log(`[${step}] Optionally update expiration for existing thread ${existingThreadTs} for chatId ${channelioChatId}...`);
+             await saveThreadTs(channelioChatId, existingThreadTs); // tsは既存のものを使い、expires_atを更新
+        }
+        // --- ここまで変更 ---
+
         console.log(`[${step}] Notification sent successfully.`);
 
     } catch (error) {
         console.error(`Error during step ${step}:`, error);
         // 9. エラーハンドリングと通知 - Renumbered from 8
         // ここで notifyError を呼ぶことで、処理中のどのステップでエラーが起きても Slack に通知される
-        await notifyError(step, error, { query, userId });
+        await notifyError(step, error, { query, userId: channelioChatId });
         // エラーが発生した場合、これ以上の処理は行わない
         throw error;
     }
@@ -531,22 +786,15 @@ serve(async (req: Request) => {
     }
 
     // 2. 情報抽出 (ここでのチェックはhandleWebhook内に移動したので簡略化)
-    //    ただし、entityやplainTextが存在しない可能性も考慮すべきだが、
-    //    まずはhandleWebhook内のチェックに任せる
-    const queryForEarlyCheck = payload.entity?.plainText; // エラー通知用に保持するクエリも修正
+    const queryForEarlyCheck = payload.entity?.plainText;
     const userIdForEarlyCheck = payload.entity?.personId;
-
-    // 必須項目 entity.plainText の基本的な存在チェック (より厳密なチェックは handleWebhook 内)
-    if (!payload.entity || typeof payload.entity.plainText !== 'string' || payload.entity.plainText.trim() === '') {
-      console.error("Request body must contain entity.plainText:", payload);
-      return new Response("Bad Request: Missing or invalid entity.plainText field", { status: 400, headers: corsHeaders });
-    }
+    const chatIdForEarlyCheck = payload.entity?.chatId;
 
     // 3. 早期レスポンスと非同期処理の開始
     handleWebhook(payload).catch(e => {
         console.error("Unhandled background error in handleWebhook:", e);
-        // エラー通知時の情報も更新
-        notifyError("UnhandledWebhookError", e, { query: queryForEarlyCheck, userId: userIdForEarlyCheck }).catch(ne => {
+        // エラー通知時の情報も更新 - chatIdもコンテキストに含める
+        notifyError("UnhandledWebhookError", e, { query: queryForEarlyCheck, userId: chatIdForEarlyCheck ?? userIdForEarlyCheck }).catch(ne => {
             console.error("CRITICAL: Failed to send unhandled error notification:", ne);
         });
     });
