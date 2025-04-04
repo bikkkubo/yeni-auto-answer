@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "lib": ["deno.ns", "dom"]
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"],
+      "exclude": ["no-explicit-any"]
+    }
+  },
+  "fmt": {
+    "options": {
+      "useTabs": false,
+      "lineWidth": 80,
+      "indentWidth": 2,
+      "singleQuote": false
+    }
+  },
+  "tasks": {
+    "dev": "deno run --watch supabase/functions/channelio-webhook-handler/index.ts"
+  }
+  // もし import_map.json を使用している場合は、以下を追加
+  // "importMap": "./import_map.json"
+}
