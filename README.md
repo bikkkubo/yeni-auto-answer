@@ -1,4 +1,4 @@
-# yeni-auto-v2
+# yeni-auto
 
 Channel.io からの問い合わせに対し、注文情報連携とAIによる回答案生成を行うSupabase Edge Functionです。
 
