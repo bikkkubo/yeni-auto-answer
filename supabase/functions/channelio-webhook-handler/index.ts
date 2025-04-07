@@ -4,8 +4,8 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-// Base64 needed for Method B (Basic Auth)
-import { encode as base64Encode } from "https://deno.land/std@0.224.0/encoding/base64.ts"; // Use a specific version or update as needed
+// Import js-base64 for Basic Auth encoding
+import { Base64 } from 'npm:js-base64@^3.7.7'; // js-base64 パッケージをインポート
 
 // --- Constants Definition ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
@@ -203,7 +203,8 @@ async function getLogilessAccessToken(): Promise<string | null> {
             refresh_token: LOGILESS_REFRESH_TOKEN
             // client_id, client_secret are NOT included in the body for Basic Auth
         });
-        const encodedCredentials = base64Encode(`${LOGILESS_CLIENT_ID}:${LOGILESS_CLIENT_SECRET}`);
+        // Use Base64.encode from js-base64
+        const encodedCredentials = Base64.encode(`${LOGILESS_CLIENT_ID}:${LOGILESS_CLIENT_SECRET}`);
         const responseB = await fetch(LOGILESS_TOKEN_ENDPOINT, {
             method: 'POST',
             headers: {
