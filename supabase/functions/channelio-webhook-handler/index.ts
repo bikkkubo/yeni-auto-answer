@@ -1,11 +1,11 @@
 // deno-lint-ignore-file no-explicit-any no-unused-vars
 // ↑ Deno/リンターエラー(誤検知)を抑制するためのコメント。不要なら削除可。
 
-import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { corsHeaders } from "../_shared/cors.ts";
+import { serve } from "https://deno.land/std@0.177.0/http/server.ts"; // {1}
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2"; // {2}
+import { corsHeaders } from "../_shared/cors.ts"; // {3}
 // Import js-base64 for Basic Auth encoding
-import { Base64 } from 'npm:js-base64@^3.7.7'; // js-base64 パッケージをインポート
+import { Base64 } from 'npm:js-base64@^3.7.7'; // js-base64 パッケージをインポート // {4}
 
 // --- Constants Definition ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
@@ -33,6 +33,15 @@ const BOT_PERSON_TYPE = 'bot';
 const IGNORED_BOT_MESSAGES: Set<string> = new Set([
     /* Add specific bot message texts to ignore, e.g., auto-replies */
 ]);
+
+// ★★★ NGキーワードリスト (これらの単語が含まれていたらスキップ) ★★★
+const IGNORED_KEYWORDS: string[] = [
+    "【新生活応援キャンペーン】", // 画像の例
+    "ランドリーポーチ",         // 画像の例から推測
+    // 他に通知を止めたいキーワードがあれば追加
+    // "特定のプロモーション名",
+    // "アンケート回答"
+];
 
 // --- Type Definitions ---
 interface ChannelioEntity {
@@ -65,45 +74,45 @@ interface LogilessTokenResponse {
 }
 
 // --- Helper Function: Post to Slack ---
-async function postToSlack(channel: string, text: string, blocks?: any[]) {
-    if (!SLACK_BOT_TOKEN) {
+async function postToSlack(channel: string, text: string, blocks?: any[]) { // {5}
+    if (!SLACK_BOT_TOKEN) { // {6}
         console.error("SLACK_BOT_TOKEN is not set.");
-        return; // Don't throw, just log and exit
-    }
-    try {
-        const payload: { channel: string; text: string; blocks?: any[] } = {
+        return;
+    } // {6}
+    try { // {7}
+        const payload: { channel: string; text: string; blocks?: any[] } = { // {8}
             channel: channel,
             text: text, // Fallback text for notifications
-        };
-        if (blocks) {
+        }; // {8}
+        if (blocks) { // {9}
             payload.blocks = blocks; // Rich Block Kit message
-        }
+        } // {9}
 
-        const response = await fetch("https://slack.com/api/chat.postMessage", {
+        const response = await fetch("https://slack.com/api/chat.postMessage", { // {10}
             method: "POST",
-            headers: {
+            headers: { // {11}
                 "Content-Type": "application/json; charset=utf-8",
                 "Authorization": `Bearer ${SLACK_BOT_TOKEN}`,
-            },
+            }, // {11}
             body: JSON.stringify(payload),
-        });
+        }); // {10}
 
-        if (!response.ok) {
+        if (!response.ok) { // {12}
             const errorData = await response.text(); // Read as text first for more details
             console.error(`Failed to post message to Slack channel ${channel}: ${response.status} ${response.statusText}. Response: ${errorData.substring(0, 500)}`);
-        } else {
+        } else { // {12}
             const data = await response.json();
-            if (!data.ok) {
+            if (!data.ok) { // {13}
                 console.error(`Slack API Error posting to ${channel}: ${data.error}`);
-            }
-        }
-    } catch (error) {
+            } // {13}
+        } // {12}
+    } catch (error) { // {7}
         console.error(`Error posting to Slack channel ${channel}:`, error);
-    }
-}
+    } // {7}
+} // {5}
 
 // --- Helper Function: Notify Error to Slack ---
-async function notifyError(step: string, error: any, context: { query?: string; userId?: string; orderNumber?: string | null; }) {
+async function notifyError(step: string, error: any, context: { query?: string; userId?: string; orderNumber?: string | null; }) { // {14}
     const timestamp = new Date().toISOString();
     const errorMessage = error instanceof Error ? error.message : String(error);
     const stack = error instanceof Error ? error.stack : undefined;
@@ -111,8 +120,8 @@ async function notifyError(step: string, error: any, context: { query?: string; 
 
     console.error(`[${step}] Error: ${errorMessage}`, context, stack);
 
-    if (SLACK_ERROR_CHANNEL_ID) {
-        const errorBlocks = [
+    if (SLACK_ERROR_CHANNEL_ID) { // {15}
+        const errorBlocks = [ // {16}
             { "type": "header", "text": { "type": "plain_text", "text": ":warning: Channelio Webhook Handler Error", "emoji": true } },
             { "type": "section", "fields": [
                 { "type": "mrkdwn", "text": `*Timestamp (UTC):*\\n${timestamp}` },
@@ -127,10 +136,10 @@ async function notifyError(step: string, error: any, context: { query?: string; 
                  { "type": "mrkdwn", "text": `*Order#:*\\n${context.orderNumber ?? 'N/A'}` }
             ] },
              { "type": "divider" }
-        ];
+        ]; // {16}
         // Use the postToSlack helper
         await postToSlack(SLACK_ERROR_CHANNEL_ID, fallbackText, errorBlocks);
-    } else {
+    } else { // {15}
         // Log detailed error if Slack channel is not configured
         console.error(
             `SLACK_ERROR_CHANNEL_ID not set. Error Details:\n` +
@@ -142,19 +151,19 @@ async function notifyError(step: string, error: any, context: { query?: string; 
             `UserID: ${context.userId ?? 'N/A'}\n` +
             `Order#: ${context.orderNumber ?? 'N/A'}`
         );
-    }
-}
+    } // {15}
+} // {14}
 
 // ★★★ Logiless Access Token Helper (Method A/B Trial Version) ★★★
-async function getLogilessAccessToken(): Promise<string | null> {
+async function getLogilessAccessToken(): Promise<string | null> { // {17}
     const step = "LogilessAuthToken";
-    if (!LOGILESS_CLIENT_ID || !LOGILESS_CLIENT_SECRET || !LOGILESS_REFRESH_TOKEN) {
+    if (!LOGILESS_CLIENT_ID || !LOGILESS_CLIENT_SECRET || !LOGILESS_REFRESH_TOKEN) { // {18}
         console.error(`[${step}] Logiless client credentials or refresh token is not set.`);
         throw new Error("Logiless refresh token or client credentials are not configured.");
-    }
+    } // {18}
 
     // --- Method A (secret in body) ---
-    try {
+    try { // {19}
         console.log(`[${step}] Attempting method A (secret in body)...`);
         const bodyA = new URLSearchParams({
             grant_type: 'refresh_token',
@@ -168,13 +177,15 @@ async function getLogilessAccessToken(): Promise<string | null> {
             body: bodyA.toString()
         });
 
-        if (responseA.ok) {
+        if (responseA.ok) { // {20}
             const tokenData: LogilessTokenResponse = await responseA.json();
-            if (tokenData.access_token) {
+            if (tokenData.access_token) { // {21}
                 console.log(`[${step}] Method A Success! Token obtained.`);
                 return tokenData.access_token;
-            } else { throw new Error("Method A: Invalid token response structure."); }
-        } else {
+            } else { // {21}
+                 throw new Error("Method A: Invalid token response structure.");
+            } // {21} No brace needed before else
+        } else { // {20}
             const errorStatusA = responseA.status;
             const errorTextA = await responseA.text();
             console.warn(`[${step}] Method A Failed (${errorStatusA}): ${errorTextA.substring(0, 200)}`);
@@ -182,7 +193,7 @@ async function getLogilessAccessToken(): Promise<string | null> {
             if (errorStatusA !== 401 && errorStatusA !== 400) {
                  // Throw if it's a server error (5xx) or other non-auth-related client error
                  throw new Error(`Method A failed definitively: ${errorStatusA} - ${errorTextA.substring(0,100)}`);
-            }
+            } // {21} 
             // If 400/401, proceed to Method B
         }
     } catch (errorA) {
@@ -219,8 +230,10 @@ async function getLogilessAccessToken(): Promise<string | null> {
             if (tokenData.access_token) {
                 console.log(`[${step}] Method B Success! Token obtained.`);
                 return tokenData.access_token;
-            } else { throw new Error("Method B: Invalid token response structure."); }
-        } else {
+            } else { // {26}
+                 throw new Error("Method B: Invalid token response structure.");
+            } // {26} No brace needed before else
+        } else { // {25}
             // Method B failed, report the error definitively
             const errorStatusB = responseB.status;
             const errorTextB = await responseB.text();
@@ -247,6 +260,7 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
     let logilessOrderInfo: string | null = null;
     let logilessOrderUrl: string | null = null;
     let orderNumber: string | null = null;
+    let orderId: string | null = null;
     let step = "Initialization";
     let supabase: SupabaseClient | null = null;
     let queryEmbedding: number[] | null = null;
@@ -257,12 +271,21 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
     try {
         // 1. Extract Order Number
         step = "OrderNumberExtraction";
-        const orderNumberMatch = query.match(/#yeni-(\d+)/i); // Case-insensitive match
-        orderNumber = orderNumberMatch ? orderNumberMatch[0] : null;
-        const orderId = orderNumberMatch ? orderNumberMatch[1] : null;
-        console.log(`[${step}] Extracted Order Number: ${orderNumber}`);
+        // "yeni-" (大文字小文字無視) の後に続く数字を抽出
+        const orderNumberMatch = query.match(/yeni-(\d+)/i);
+        let orderNumber: string | null = null; // マッチした文字列全体 (例: YENI-11316)
+        let orderId: string | null = null;     // 数字部分 (例: 11316)
 
-        // 2. Logiless API Interaction (if order number found)
+        if (orderNumberMatch) {
+            orderNumber = orderNumberMatch[0]; // マッチした部分全体を取得
+            orderId = orderNumberMatch[1];     // 数字部分を取得
+        } else {
+             console.log(`[${step}] No 'yeni-XXXXX' format found in query.`);
+             // 必要であれば、数字のみの抽出ロジックをここに追加検討
+        }
+        console.log(`[${step}] Extracted Order Number: ${orderNumber}, Order ID: ${orderId}`); // IDもログ出力
+
+        // 2. Logiless API Interaction (if orderNumber AND orderId found) // orderIdもチェック
         if (orderNumber && orderId) {
             let logilessAccessToken: string | null = null;
             // 2a. Get Access Token
@@ -279,17 +302,14 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
             // 2b. Call Logiless Order API (if token obtained)
             if (logilessAccessToken) {
                 step = "LogilessAPICall";
-                try {
-                    if (!LOGILESS_MERCHANT_ID) {
-                        // マーチャントIDがない場合はエラー処理
-                        console.error(`[${step}] LOGILESS_MERCHANT_ID is not set. Cannot call Logiless Order API.`);
-                        logilessOrderInfo = "設定エラー: マーチャントID未設定";
-                        logilessAccessToken = null; // 後続のfetchをスキップ
-                    } else {
-                        // マーチャントIDがある場合のみURLを組み立ててAPI呼び出し
+                if (!LOGILESS_MERCHANT_ID) { // {33}
+                    console.error(`[${step}] LOGILESS_MERCHANT_ID is not set.`);
+                    logilessOrderInfo = "設定エラー: マーチャントID未設定";
+                    logilessAccessToken = null;
+                } else { // {33}
+                    try { // {32}
                         const logilessApiUrl = `https://app2.logiless.com/api/v1/merchant/${LOGILESS_MERCHANT_ID}/sales_orders?code=${encodeURIComponent(orderNumber)}`;
                         console.log(`[${step}] Calling Logiless API: ${logilessApiUrl}`);
-
                         const response = await fetch(logilessApiUrl, {
                             method: 'GET', // Confirmed as GET
                             headers: {
@@ -338,11 +358,11 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
                             console.error(`[${step}] Logiless API request failed: ${response.status}, Response: ${errorText.substring(0, 500)}`);
                             await notifyError(step, new Error(`Logiless API request failed: ${response.status}`), { query, userId, orderNumber });
                         }
-                } catch (apiError) {
-                    // Catch unexpected errors during fetch/processing
-                    if (!logilessOrderInfo) logilessOrderInfo = "ロジレス情報取得エラー"; // Set generic error if not already set
-                    await notifyError(step, apiError, { query, userId, orderNumber });
-                }
+                    } catch (apiError) { // {32}
+                        if (!logilessOrderInfo) logilessOrderInfo = "ロジレス情報取得エラー";
+                        await notifyError(step, apiError, { query, userId, orderNumber });
+                    } // {32}
+                } // {33} End of else block
             }
         } else {
             console.log(`[LogilessProcessing] No valid order number found in query.`);
@@ -573,6 +593,17 @@ serve(async (req: Request) => {
              console.log("[Filter] Skipping empty message.");
              return new Response(JSON.stringify({ status: "skipped", reason: "empty message" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
+
+        // ★★★ NGキーワードチェックを追加 ★★★
+        if (messageText && IGNORED_KEYWORDS.some(keyword => messageText.includes(keyword))) {
+            const foundKeyword = IGNORED_KEYWORDS.find(keyword => messageText.includes(keyword)); // どのキーワードでスキップされたかログ用
+            console.log(`[Filter] Skipping message containing ignored keyword: "${foundKeyword}"`);
+            return new Response(JSON.stringify({ status: "skipped", reason: `ignored keyword: ${foundKeyword}` }), {
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+                status: 200,
+            });
+        }
+        // ★★★ ここまで追加 ★★★
 
         console.log("Webhook payload passed filters. Triggering background processing...");
 
