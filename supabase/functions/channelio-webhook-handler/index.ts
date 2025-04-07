@@ -18,7 +18,7 @@ const SLACK_ERROR_CHANNEL_ID = Deno.env.get("SLACK_ERROR_CHANNEL_ID");
 const LOGILESS_CLIENT_ID = Deno.env.get("LOGILESS_CLIENT_ID");
 const LOGILESS_CLIENT_SECRET = Deno.env.get("LOGILESS_CLIENT_SECRET");
 const LOGILESS_REFRESH_TOKEN = Deno.env.get("LOGILESS_REFRESH_TOKEN");
-const LOGILESS_TOKEN_ENDPOINT = Deno.env.get("LOGILESS_TOKEN_ENDPOINT") || "https://app2.logiless.com/api/oauth2/token"; // ★★ TODO: Verify this URL ★★
+const LOGILESS_TOKEN_ENDPOINT = Deno.env.get("LOGILESS_TOKEN_ENDPOINT") || "https://app2.logiless.com/oauth2/token";
 const LOGILESS_MERCHANT_ID = Deno.env.get("LOGILESS_MERCHANT_ID"); // ★★ TODO: Set if needed for detail URL ★★
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
@@ -265,7 +265,7 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
                     logilessAccessToken = null;
                 } else { // {33}
                     try { // {32}
-                        const logilessApiUrl = `https://app2.logiless.com/api/v1/merchant/${LOGILESS_MERCHANT_ID}/sales_orders?code=${encodeURIComponent(orderNumber)}`;
+                        const logilessApiUrl = `https://app2.logiless.com/v1/merchant/${LOGILESS_MERCHANT_ID}/sales_orders?code=${encodeURIComponent(orderNumber)}`;
                         console.log(`[${step}] Calling Logiless API: ${logilessApiUrl}`);
                         const response = await fetch(logilessApiUrl, {
                             method: 'GET', // Confirmed as GET
