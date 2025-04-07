@@ -5,7 +5,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts"; // {1}
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2"; // {2}
 import { corsHeaders } from "../_shared/cors.ts"; // {3}
 // Import js-base64 for Basic Auth encoding
-import { Base64 } from 'npm:js-base64@^3.7.7'; // js-base64 パッケージをインポート // {4}
+// import { Base64 } from 'npm:js-base64@^3.7.7'; // js-base64 パッケージをインポート // {4}
 
 // --- Constants Definition ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
@@ -154,7 +154,7 @@ async function notifyError(step: string, error: any, context: { query?: string; 
     } // {15}
 } // {14}
 
-// ★★★ Logiless Access Token Helper (Method A/B Trial Version) ★★★
+// ★★★ Logiless Access Token Helper (Method A - ボディにSecret) ★★★
 async function getLogilessAccessToken(): Promise<string | null> { // {17}
     const step = "LogilessAuthToken";
     if (!LOGILESS_CLIENT_ID || !LOGILESS_CLIENT_SECRET || !LOGILESS_REFRESH_TOKEN) { // {18}
@@ -164,7 +164,7 @@ async function getLogilessAccessToken(): Promise<string | null> { // {17}
 
     // --- Method A (secret in body) ---
     try { // {19}
-        console.log(`[${step}] Attempting method A (secret in body)...`);
+        console.log(`[${step}] Requesting Logiless access token using refresh token (secret in body) from ${LOGILESS_TOKEN_ENDPOINT}...`);
         const bodyA = new URLSearchParams({
             grant_type: 'refresh_token',
             refresh_token: LOGILESS_REFRESH_TOKEN,
@@ -180,72 +180,29 @@ async function getLogilessAccessToken(): Promise<string | null> { // {17}
         if (responseA.ok) { // {20}
             const tokenData: LogilessTokenResponse = await responseA.json();
             if (tokenData.access_token) { // {21}
-                console.log(`[${step}] Method A Success! Token obtained.`);
+                console.log(`[${step}] Token obtained successfully.`);
                 return tokenData.access_token;
             } else { // {21}
-                 throw new Error("Method A: Invalid token response structure.");
-            } // {21} No brace needed before else
+                console.error(`[${step}] Invalid token response structure (missing access_token):`, tokenData);
+                throw new Error("Method A: Invalid token response structure.");
+            } // {21}
         } else { // {20}
+            // Method A failed
             const errorStatusA = responseA.status;
             const errorTextA = await responseA.text();
-            console.warn(`[${step}] Method A Failed (${errorStatusA}): ${errorTextA.substring(0, 200)}`);
-            // Try Method B only if Method A failed with a likely auth method error (400/401)
-            if (errorStatusA !== 401 && errorStatusA !== 400) {
-                 // Throw if it's a server error (5xx) or other non-auth-related client error
-                 throw new Error(`Method A failed definitively: ${errorStatusA} - ${errorTextA.substring(0,100)}`);
-            } // {21} 
-            // If 400/401, proceed to Method B
+            let detailedErrorMessage = `Logiless token request failed with status ${errorStatusA}: ${errorTextA.substring(0, 200)}`;
+            if (errorTextA.toLowerCase().includes("invalid_grant")) { detailedErrorMessage += "\nPOSSIBLE CAUSE: Refresh token invalid/expired/revoked."; }
+            else if (errorTextA.toLowerCase().includes("invalid_client")) { detailedErrorMessage += "\nPOSSIBLE CAUSE: Client ID/Secret incorrect."; }
+            else if (errorTextA.toLowerCase().includes("unsupported_grant_type")) { detailedErrorMessage += "\nPOSSIBLE CAUSE: 'refresh_token' grant type not supported."; }
+            console.error(`[${step}] Failed to get Logiless access token. Response:`, errorTextA);
+            throw new Error(detailedErrorMessage);
         }
-    } catch (errorA) {
-        // Catch errors from fetch itself or explicit throws within Method A try block
-        console.warn(`[${step}] Error during Method A attempt:`, errorA instanceof Error ? errorA.message : String(errorA));
-        // If Method A failed definitively, rethrow to prevent trying Method B
-        if (errorA instanceof Error && errorA.message.startsWith("Method A failed definitively")) {
-            throw errorA;
-        }
-        // Otherwise, assume it's worth trying Method B
+    } catch (error) { // Catch errors from fetch or explicit throws
+        console.error(`[${step}] Unexpected error getting Logiless access token:`, error);
+        // Throw a final error indicating failure
+        throw new Error(`Failed to obtain Logiless token. Error: ${error instanceof Error ? error.message : String(error)}`);
     }
-
-    // --- Method B (Basic Auth) ---
-    try {
-         console.log(`[${step}] Trying Method B (Basic Auth)...`);
-         const bodyB = new URLSearchParams({
-            grant_type: 'refresh_token',
-            refresh_token: LOGILESS_REFRESH_TOKEN
-            // client_id, client_secret are NOT included in the body for Basic Auth
-        });
-        // Use Base64.encode from js-base64
-        const encodedCredentials = Base64.encode(`${LOGILESS_CLIENT_ID}:${LOGILESS_CLIENT_SECRET}`);
-        const responseB = await fetch(LOGILESS_TOKEN_ENDPOINT, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Authorization': `Basic ${encodedCredentials}`
-            },
-            body: bodyB.toString()
-        });
-
-        if (responseB.ok) {
-            const tokenData: LogilessTokenResponse = await responseB.json();
-            if (tokenData.access_token) {
-                console.log(`[${step}] Method B Success! Token obtained.`);
-                return tokenData.access_token;
-            } else { // {26}
-                 throw new Error("Method B: Invalid token response structure.");
-            } // {26} No brace needed before else
-        } else { // {25}
-            // Method B failed, report the error definitively
-            const errorStatusB = responseB.status;
-            const errorTextB = await responseB.text();
-            console.error(`[${step}] Method B Failed (${errorStatusB}): ${errorTextB.substring(0, 200)}`);
-            throw new Error(`Both Method A and B failed. Method B error: ${errorStatusB} - ${errorTextB.substring(0,100)}`);
-        }
-    } catch (errorB) {
-        // Catch errors from fetch itself or explicit throws within Method B try block
-        console.error(`[${step}] Error during Method B attempt:`, errorB instanceof Error ? errorB.message : String(errorB));
-        // Throw a final error indicating both methods failed
-        throw new Error(`Failed to obtain Logiless token using both methods. Last error: ${errorB instanceof Error ? errorB.message : String(errorB)}`);
-    }
+    // Method B logic is completely removed
 }
 
 // --- Main Background Processing Function ---
