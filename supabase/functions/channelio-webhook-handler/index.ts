@@ -280,59 +280,64 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
             if (logilessAccessToken) {
                 step = "LogilessAPICall";
                 try {
-                    // ★★ TODO: Verify API endpoint URL and query parameter structure ★★
-                    const logilessApiUrl = `https://app2.logiless.com/api/v1/merchant/orders?code=${encodeURIComponent(orderNumber)}`;
-                    console.log(`[${step}] Calling Logiless API: ${logilessApiUrl}`);
-
-                    const response = await fetch(logilessApiUrl, {
-                        method: 'GET', // ★★ TODO: Verify HTTP method (GET, POST, etc.) ★★
-                        headers: {
-                            'Authorization': `Bearer ${logilessAccessToken}`, // Use the obtained token
-                            'Accept': 'application/json'
-                        }
-                    });
-
-                    if (response.ok) {
-                        // ★★ TODO: Verify if the response is an array or single object ★★
-                        const data: LogilessOrderData[] | LogilessOrderData = await response.json();
-                        let orderData: LogilessOrderData | undefined;
-
-                        // Find the specific order if response is an array
-                        if (Array.isArray(data)) {
-                             // ★★ TODO: Verify the condition to find the correct order (e.g., matching code) ★★
-                            orderData = data.find(d => d.code === orderNumber);
-                        } else {
-                            // Assume single object response matches the requested order code
-                            orderData = data;
-                        }
-
-                        if (orderData) {
-                            console.log(`[${step}] Logiless API Success. Found order data.`);
-                            // ★★ TODO: Extract relevant information based on actual LogilessOrderData fields ★★
-                            const itemsText = orderData.items?.map(item => `${item.name}(${item.quantity})`).join(', ') || '商品情報なし';
-                            logilessOrderInfo = `注文日: ${orderData.order_date || '不明'}, 商品: ${itemsText}, ステータス: ${orderData.status || '不明'}`;
-
-                            // ★★ TODO: Determine detail URL - use API field or construct it ★★
-                            logilessOrderUrl = orderData.details_url || (LOGILESS_MERCHANT_ID && orderId ? `https://app2.logiless.com/merchant/${LOGILESS_MERCHANT_ID}/sales_orders/${orderId}` : null);
-                            console.log(`[${step}] Logiless Info: ${logilessOrderInfo}, URL: ${logilessOrderUrl}`);
-                        } else {
-                            logilessOrderInfo = `注文番号 ${orderNumber} のデータが見つかりませんでした。`;
-                            console.log(`[${step}] Logiless API Success, but order ${orderNumber} not found in response.`);
-                        }
-                    } else if (response.status === 401 || response.status === 403) {
-                        logilessOrderInfo = "ロジレスAPI権限エラー";
-                        console.error(`[${step}] Logiless API auth error: ${response.status}`);
-                        // Don't throw here, let the process continue with error info
-                        await notifyError(step, new Error(`Logiless API auth error: ${response.status}`), { query, userId, orderNumber });
-                    } else if (response.status === 404) {
-                        logilessOrderInfo = `注文番号 ${orderNumber} はロジレスで見つかりませんでした。`;
-                        console.log(`[${step}] Logiless API returned 404 for order ${orderNumber}`);
+                    if (!LOGILESS_MERCHANT_ID) {
+                        // マーチャントIDがない場合はエラー処理
+                        console.error(`[${step}] LOGILESS_MERCHANT_ID is not set. Cannot call Logiless Order API.`);
+                        logilessOrderInfo = "設定エラー: マーチャントID未設定";
+                        logilessAccessToken = null; // 後続のfetchをスキップ
                     } else {
-                        logilessOrderInfo = "ロジレスAPIエラー";
-                        const errorText = await response.text();
-                        console.error(`[${step}] Logiless API request failed: ${response.status}, Response: ${errorText.substring(0, 500)}`);
-                        await notifyError(step, new Error(`Logiless API request failed: ${response.status}`), { query, userId, orderNumber });
-                    }
+                        // マーチャントIDがある場合のみURLを組み立ててAPI呼び出し
+                        const logilessApiUrl = `https://app2.logiless.com/api/v1/merchant/${LOGILESS_MERCHANT_ID}/sales_orders?code=${encodeURIComponent(orderNumber)}`;
+                        console.log(`[${step}] Calling Logiless API: ${logilessApiUrl}`);
+
+                        const response = await fetch(logilessApiUrl, {
+                            method: 'GET', // Confirmed as GET
+                            headers: {
+                                'Authorization': `Bearer ${logilessAccessToken}`,
+                                'Accept': 'application/json'
+                            }
+                        });
+                        if (response.ok) {
+                            // ★★ TODO: Verify if the response is an array or single object ★★
+                            const data: LogilessOrderData[] | LogilessOrderData = await response.json();
+                            let orderData: LogilessOrderData | undefined;
+
+                            // Find the specific order if response is an array
+                            if (Array.isArray(data)) {
+                                // ★★ TODO: Verify the condition to find the correct order (e.g., matching code) ★★
+                                orderData = data.find(d => d.code === orderNumber);
+                            } else {
+                                // Assume single object response matches the requested order code
+                                orderData = data;
+                            }
+
+                            if (orderData) {
+                                console.log(`[${step}] Logiless API Success. Found order data.`);
+                                // ★★ TODO: Extract relevant information based on actual LogilessOrderData fields ★★
+                                const itemsText = orderData.items?.map(item => `${item.name}(${item.quantity})`).join(', ') || '商品情報なし';
+                                logilessOrderInfo = `注文日: ${orderData.order_date || '不明'}, 商品: ${itemsText}, ステータス: ${orderData.status || '不明'}`;
+
+                                // ★★ TODO: Determine detail URL - use API field or construct it ★★
+                                logilessOrderUrl = orderData.details_url || (LOGILESS_MERCHANT_ID && orderId ? `https://app2.logiless.com/merchant/${LOGILESS_MERCHANT_ID}/sales_orders/${orderId}` : null);
+                                console.log(`[${step}] Logiless Info: ${logilessOrderInfo}, URL: ${logilessOrderUrl}`);
+                            } else {
+                                logilessOrderInfo = `注文番号 ${orderNumber} のデータが見つかりませんでした。`;
+                                console.log(`[${step}] Logiless API Success, but order ${orderNumber} not found in response.`);
+                            }
+                        } else if (response.status === 401 || response.status === 403) {
+                            logilessOrderInfo = "ロジレスAPI権限エラー";
+                            console.error(`[${step}] Logiless API auth error: ${response.status}`);
+                            // Don't throw here, let the process continue with error info
+                            await notifyError(step, new Error(`Logiless API auth error: ${response.status}`), { query, userId, orderNumber });
+                        } else if (response.status === 404) {
+                            logilessOrderInfo = `注文番号 ${orderNumber} はロジレスで見つかりませんでした。`;
+                            console.log(`[${step}] Logiless API returned 404 for order ${orderNumber}`);
+                        } else {
+                            logilessOrderInfo = "ロジレスAPIエラー";
+                            const errorText = await response.text();
+                            console.error(`[${step}] Logiless API request failed: ${response.status}, Response: ${errorText.substring(0, 500)}`);
+                            await notifyError(step, new Error(`Logiless API request failed: ${response.status}`), { query, userId, orderNumber });
+                        }
                 } catch (apiError) {
                     // Catch unexpected errors during fetch/processing
                     if (!logilessOrderInfo) logilessOrderInfo = "ロジレス情報取得エラー"; // Set generic error if not already set
