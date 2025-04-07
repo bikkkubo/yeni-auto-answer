@@ -58,19 +58,20 @@ interface ChannelioWebhookPayload { event?: string; type?: string; entity: Chann
 interface Document { content: string; source_type?: string; question?: string; }
 // Logiless Types (Adjust fields based on actual API response)
 // ★★ TODO: Verify Logiless API response structure and update these types ★★
+// ★★ LogilessOrderData 型定義修正 ★★
 interface LogilessOrderData {
-    code?: string; // The #yeni-xxxxx number
-    order_date?: string;
-    items?: { name: string; quantity: number; }[];
-    status?: string;
-    details_url?: string; // Direct URL if provided by API
-    // Add other relevant fields
+    id?: number | string;       // ★ 内部ID (数値か文字列か要確認)
+    code?: string;              // 受注コード
+    document_date?: string;   // ★ 注文日 (仮)
+    posting_date?: string; // 転記日?
+    status?: string;            // ★ ステータス (仮)
+    delivery_status?: string; // 配送ステータス?
+    lines?: any[]; // ★ 商品リスト (中身の構造は不明なためany[]) - 詳細取得が必要な可能性あり
+    // 他のレスポンスに含まれるフィールドがあれば追加
 }
-interface LogilessTokenResponse {
-    access_token: string;
-    token_type: string; // Usually "Bearer"
-    expires_in: number; // Validity duration in seconds
-    refresh_token?: string; // May or may not be returned on refresh
+// LogilessAPIレスポンス全体の型を追加
+interface LogilessSearchResponse {
+    data: LogilessOrderData[];
 }
 
 // --- Helper Function: Post to Slack ---
@@ -264,61 +265,77 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
                     logilessOrderInfo = "設定エラー: マーチャントID未設定";
                     logilessAccessToken = null;
                 } else { // {33}
-                    try { // {32}
-                        const logilessApiUrl = `https://app2.logiless.com/v1/merchant/${LOGILESS_MERCHANT_ID}/sales_orders?code=${encodeURIComponent(orderNumber)}`;
-                        console.log(`[${step}] Calling Logiless API: ${logilessApiUrl}`);
+                    try { // {32} - try ブロック開始
+                    if (!LOGILESS_MERCHANT_ID) { // {33}
+                        console.error(`[${step}] LOGILESS_MERCHANT_ID is not set.`);
+                        logilessOrderInfo = "設定エラー: マーチャントID未設定";
+                    } else { // {33} - マーチャントIDがある場合
+                        const logilessApiUrl = `https://app2.logiless.com/v1/merchant/${LOGILESS_MERCHANT_ID}/sales_orders/search`; // ★ Searchエンドポイント ★
+                        const requestBody = { codes: [orderNumber] }; // ★ リクエストボディ ★
+
+                        console.log(`[${step}] Calling Logiless Search API: ${logilessApiUrl}`, requestBody);
+
                         const response = await fetch(logilessApiUrl, {
-                            method: 'GET', // Confirmed as GET
+                            method: 'POST', // ★ POSTメソッド ★
                             headers: {
                                 'Authorization': `Bearer ${logilessAccessToken}`,
+                                'Content-Type': 'application/json', // ★ Content-Type ★
                                 'Accept': 'application/json'
-                            }
+                            },
+                            body: JSON.stringify(requestBody) // ★ ボディをJSON化 ★
                         });
-                        if (response.ok) {
-                            // ★★ TODO: Verify if the response is an array or single object ★★
-                            const data: LogilessOrderData[] | LogilessOrderData = await response.json();
+
+                        if (response.ok) { // {34} - レスポンスOK
+                            const responseData: LogilessSearchResponse = await response.json(); // ★ レスポンス全体の型 ★
+                            const orders: LogilessOrderData[] = responseData.data || []; // ★ data配列を取得 ★
                             let orderData: LogilessOrderData | undefined;
 
-                            // Find the specific order if response is an array
-                            if (Array.isArray(data)) {
-                                // ★★ TODO: Verify the condition to find the correct order (e.g., matching code) ★★
-                                orderData = data.find(d => d.code === orderNumber);
-                            } else {
-                                // Assume single object response matches the requested order code
-                                orderData = data;
-                            }
+                            if (orders && orders.length > 0) { // {35} - 結果配列に要素があるか
+                                // codeが一致する最初の注文を取得 (念のため)
+                                orderData = orders.find(d => d.code?.toLowerCase() === orderNumber?.toLowerCase());
 
-                            if (orderData) {
-                                console.log(`[${step}] Logiless API Success. Found order data.`);
-                                // ★★ TODO: Extract relevant information based on actual LogilessOrderData fields ★★
-                                const itemsText = orderData.items?.map(item => `${item.name}(${item.quantity})`).join(', ') || '商品情報なし';
-                                logilessOrderInfo = `注文日: ${orderData.order_date || '不明'}, 商品: ${itemsText}, ステータス: ${orderData.status || '不明'}`;
+                                if (orderData) { // {36} - 一致する注文が見つかった
+                                     console.log(`[${step}] Logiless API Success. Found order data.`);
+                                    // ★★ 情報抽出 (フィールド名は仮定、商品情報は lines を見るか別途取得) ★★
+                                    logilessOrderInfo = `注文日: ${orderData.document_date || '不明'}, ステータス: ${orderData.status || '不明'}`; // 商品情報を削除
 
-                                // ★★ TODO: Determine detail URL - use API field or construct it ★★
-                                logilessOrderUrl = orderData.details_url || (LOGILESS_MERCHANT_ID && orderId ? `https://app2.logiless.com/merchant/${LOGILESS_MERCHANT_ID}/sales_orders/${orderId}` : null);
-                                console.log(`[${step}] Logiless Info: ${logilessOrderInfo}, URL: ${logilessOrderUrl}`);
-                            } else {
-                                logilessOrderInfo = `注文番号 ${orderNumber} のデータが見つかりませんでした。`;
-                                console.log(`[${step}] Logiless API Success, but order ${orderNumber} not found in response.`);
-                            }
-                        } else if (response.status === 401 || response.status === 403) {
-                            logilessOrderInfo = "ロジレスAPI権限エラー";
-                            console.error(`[${step}] Logiless API auth error: ${response.status}`);
-                            // Don't throw here, let the process continue with error info
-                            await notifyError(step, new Error(`Logiless API auth error: ${response.status}`), { query, userId, orderNumber });
-                        } else if (response.status === 404) {
-                            logilessOrderInfo = `注文番号 ${orderNumber} はロジレスで見つかりませんでした。`;
-                            console.log(`[${step}] Logiless API returned 404 for order ${orderNumber}`);
-                        } else {
+                                    // ★★ 詳細URL組み立て (内部ID 'id' を使用) ★★
+                                    const logilessInternalId = orderData.id;
+                                    if (logilessInternalId) {
+                                        logilessOrderUrl = `https://app2.logiless.com/merchant/${LOGILESS_MERCHANT_ID}/sales_orders/${logilessInternalId}`;
+                                    } else {
+                                        console.warn(`[${step}] Could not find internal Logiless order ID ('id' field) in the response.`);
+                                        logilessOrderUrl = null;
+                                    }
+                                    console.log(`[${step}] Logiless Info: ${logilessOrderInfo}, URL: ${logilessOrderUrl}`);
+
+                                } else { // {36} - codeが一致するものがなかった場合
+                                     logilessOrderInfo = `注文番号 ${orderNumber} に完全に一致するデータが見つかりませんでした。`;
+                                     console.log(`[${step}] Logiless API Success, but no exact code match found for ${orderNumber} in response array.`);
+                                } // {36}
+                            } else { // {35} - 結果配列が空の場合
+                                logilessOrderInfo = `注文番号 ${orderNumber} のデータが見つかりませんでした (空の結果)。`;
+                                console.log(`[${step}] Logiless API Success, but response data array is empty for code ${orderNumber}.`);
+                            } // {35}
+                        } else if (response.status === 401 || response.status === 403) { // {34} - 認証エラー
+                             logilessOrderInfo = "ロジレスAPI権限エラー";
+                             console.error(`[${step}] Logiless API auth error: ${response.status}`);
+                             await notifyError(step, new Error(`Logiless API auth error: ${response.status}`), { query, userId, orderNumber });
+                        } else if (response.status === 404) { // {34} - エンドポイント自体がない場合など
+                             logilessOrderInfo = `ロジレスAPIエンドポイントが見つかりません (404)`;
+                             console.error(`[${step}] Logiless Search API endpoint not found (404). URL: ${logilessApiUrl}`);
+                             await notifyError(step, new Error(`Logiless API endpoint not found (404)`), { query, userId, orderNumber });
+                        } else { // {34} - その他のAPIエラー
                             logilessOrderInfo = "ロジレスAPIエラー";
                             const errorText = await response.text();
                             console.error(`[${step}] Logiless API request failed: ${response.status}, Response: ${errorText.substring(0, 500)}`);
                             await notifyError(step, new Error(`Logiless API request failed: ${response.status}`), { query, userId, orderNumber });
-                        }
-                    } catch (apiError) { // {32}
-                        if (!logilessOrderInfo) logilessOrderInfo = "ロジレス情報取得エラー";
-                        await notifyError(step, apiError, { query, userId, orderNumber });
-                    } // {32}
+                        } // {34}
+                    } // {33} - elseブロックの閉じ
+                } catch (apiError) { // {32} - tryブロックの閉じに対応するcatch
+                    if (!logilessOrderInfo) logilessOrderInfo = "ロジレス情報取得エラー";
+                    await notifyError(step, apiError, { query, userId, orderNumber });
+                    } // {32} - catchブロックの閉じ
                 } // {33} End of else block
             }
         } else {
