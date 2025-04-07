@@ -4,7 +4,8 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders } from "../_shared/cors.ts";
-// Base64 import removed, using btoa() instead
+// Base64 needed for Method B (Basic Auth)
+import { encode as base64Encode } from "https://deno.land/std@0.224.0/encoding/base64.ts"; // Use a specific version or update as needed
 
 // --- Constants Definition ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
@@ -202,8 +203,7 @@ async function getLogilessAccessToken(): Promise<string | null> {
             refresh_token: LOGILESS_REFRESH_TOKEN
             // client_id, client_secret are NOT included in the body for Basic Auth
         });
-        // Use btoa() instead of imported base64Encode
-        const encodedCredentials = btoa(`${LOGILESS_CLIENT_ID}:${LOGILESS_CLIENT_SECRET}`);
+        const encodedCredentials = base64Encode(`${LOGILESS_CLIENT_ID}:${LOGILESS_CLIENT_SECRET}`);
         const responseB = await fetch(LOGILESS_TOKEN_ENDPOINT, {
             method: 'POST',
             headers: {
@@ -465,40 +465,36 @@ ${query}
         // 7. Post Results to Slack
         step = "SlackNotify";
         const blocks = [
-            { "type": "header", "text": { "type": "plain_text", "text": ":incoming_envelope: Yeni Auto V2: 新しいChannel.io問い合わせ", "emoji": true } },
+            { "type": "header", "text": { "type": "plain_text", "text": ":loudspeaker: 新しい問い合わせがありました", "emoji": true } },
             { "type": "section", "fields": [
-                 { "type": "mrkdwn", "text": `*顧客名:*\\n${customerName || '不明'}` },
-                 { "type": "mrkdwn", "text": `*UserID:*\\n${userId || '不明'}` }
-                 // { "type": "mrkdwn", "text": `*ChatID:*\\n${chatId || '不明'}` } // Optional
-             ] },
-            { "type": "section", "text": { "type": "mrkdwn", "text": "*問い合わせ内容:*" } },
-            { "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`${query}\\\`\\\`\\\`` } },
-            { "type": "divider" },
-            { "type": "section", "text": { "type": "mrkdwn", "text": "*<https://app2.logiless.com/|ロジレス連携結果>*" } },
+                { "type": "mrkdwn", "text": `*顧客名:*\\n${customerName || '不明'}` },
+                { "type": "mrkdwn", "text": `*Channelioリンク:*\\n不明` } // 取得方法がなければ不明のまま
+            ] },
+            { "type": "section", "text": { "type": "mrkdwn", "text": `*問い合わせ内容:*` } },
+            { "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`${query}\\\`\\\`\\\`` } }, // エスケープ済
+            { "type": "divider" }, // ★区切り線★
+            { "type": "section", "text": { "type": "mrkdwn", "text": "*<https://app2.logiless.com/|ロジレス連携結果>*" } }, // ★見出し★
             { "type": "section", "fields": [
                 { "type": "mrkdwn", "text": `*注文番号:*\\n${orderNumber || 'N/A'}` },
                 { "type": "mrkdwn", "text": `*情報ステータス:*\\n${logilessOrderInfo || '連携なし/失敗'}` }
             ]},
-            // Use primary style for button if URL exists
-            (logilessOrderUrl ? {
-                "type": "actions" as const, 
-                "elements": [
-                    { 
-                        "type": "button" as const, 
-                        "text": { "type": "plain_text" as const, "text": "ロジレスで注文詳細を開く", "emoji": true }, 
-                        "url": logilessOrderUrl, 
-                        "action_id": "open_logiless_order",
-                        "style": "primary" // Added primary style for emphasis
-                    }
-                ]
-            } : { 
-                 "type": "context" as const, 
+            (logilessOrderUrl ? { // ★URLボタン (強調)★
+                "type": "actions" as const,
+                "elements": [{ 
+                    "type": "button" as const,
+                    "text": { "type": "plain_text" as const, "text": "ロジレスで詳細を確認", "emoji": true },
+                    "url": logilessOrderUrl, 
+                    "style": "primary" as const, // ★強調スタイル★
+                    "action_id": "logiless_link_button" 
+                }]
+            } : { // ★URLなしテキスト★
+                 "type": "context" as const,
                  "elements": [ { "type": "mrkdwn" as const, "text": "ロジレス詳細URL: なし" } ] 
             }),
-            { "type": "divider" },
-            { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } },
-        	{ "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`${aiResponse || '(AI回答生成エラー)'}\\\`\\\`\\\`` } } // Use fallback from AI step
-             // Note: The '参照ドキュメント' context block is removed as per the new structure provided.
+            { "type": "divider" }, // ★区切り線★
+            { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } }, // ★見出し★
+        	{ "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`${aiResponse || '(AI回答生成エラー)'}\\\`\\\`\\\`` } } // エスケープ済
+            // 参照ドキュメントの表示は削除
         ];
         const fallbackText = `新規問い合わせ: ${query.substring(0, 50)}... (顧客: ${customerName || '不明'})`;
 
