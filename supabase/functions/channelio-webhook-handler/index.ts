@@ -480,16 +480,16 @@ ${query}
         const blocks = [
             { "type": "header", "text": { "type": "plain_text", "text": ":loudspeaker: 新しい問い合わせがありました", "emoji": true } },
             { "type": "section", "fields": [
-                { "type": "mrkdwn", "text": `*顧客名:*\\n${customerName || '不明'}` },
-                { "type": "mrkdwn", "text": `*Channelioリンク:*\\n不明` } // 取得方法がなければ不明のまま
+                { "type": "mrkdwn", "text": `*顧客名:* ${customerName || '不明'}` },
+                { "type": "mrkdwn", "text": `*Channelioリンク:* 不明` }
             ] },
             { "type": "section", "text": { "type": "mrkdwn", "text": `*問い合わせ内容:*` } },
-            { "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`${query}\\\`\\\`\\\`` } }, // エスケープ済
+            { "type": "section", "text": { "type": "mrkdwn", "text": "```\\n" + query + "\\n```" } },
             { "type": "divider" }, // ★区切り線★
             { "type": "section", "text": { "type": "mrkdwn", "text": "*<https://app2.logiless.com/|ロジレス連携結果>*" } }, // ★見出し★
             { "type": "section", "fields": [
-                { "type": "mrkdwn", "text": `*注文番号:*\\n${orderNumber || 'N/A'}` },
-                { "type": "mrkdwn", "text": `*情報ステータス:*\\n${logilessOrderInfo || '連携なし/失敗'}` }
+                { "type": "mrkdwn", "text": `*注文番号:* ${orderNumber || 'N/A'}` },
+                { "type": "mrkdwn", "text": `*情報ステータス:* ${logilessOrderInfo || '連携なし/失敗'}` }
             ]},
             (logilessOrderUrl ? { // ★URLボタン (強調)★
                 "type": "actions" as const,
@@ -506,7 +506,7 @@ ${query}
             }),
             { "type": "divider" }, // ★区切り線★
             { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } }, // ★見出し★
-        	{ "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`${aiResponse || '(AI回答生成エラー)'}\\\`\\\`\\\`` } } // エスケープ済
+        	{ "type": "section", "text": { "type": "mrkdwn", "text": "```\\n" + (aiResponse || '(AI回答生成エラー)') + "\\n```" } }
             // 参照ドキュメントの表示は削除
         ];
         const fallbackText = `新規問い合わせ: ${query.substring(0, 50)}... (顧客: ${customerName || '不明'})`;
