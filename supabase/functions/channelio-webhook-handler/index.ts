@@ -288,6 +288,7 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
                         if (response.ok) { // {34} - レスポンスOK
                             // ★ レスポンスが配列か単一オブジェクトか不明なため両対応 ★
                             const data: LogilessOrderData[] | LogilessOrderData = await response.json();
+                            console.log("[LogilessAPICall] Received Logiless API Response:", JSON.stringify(data, null, 2));
                             let orderData: LogilessOrderData | undefined;
 
                             if (Array.isArray(data)) { // {35} - 配列の場合
