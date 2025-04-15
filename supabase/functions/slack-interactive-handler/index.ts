@@ -2,7 +2,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { verifySlackRequest } from "./slackVerify.ts"; // Slackリクエスト検証ヘルパー
+import { verifySlackRequest } from "../_shared/slackVerify.ts"; // Slackリクエスト検証ヘルパー
 import { corsHeaders } from "../_shared/cors.ts"; // CORSヘッダー (OPTIONS用に必要かも)
 
 // --- Environment Variables ---
