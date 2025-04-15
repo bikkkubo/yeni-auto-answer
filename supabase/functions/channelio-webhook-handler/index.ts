@@ -52,6 +52,20 @@ const IGNORED_KEYWORDS: string[] = [
     // 他に通知を止めたいキーワードがあれば追加
 ];
 
+// ★★★ Notify Only Messages (No AI/Logiless) ★★★
+const NOTIFY_ONLY_MESSAGES: Set<string> = new Set([
+    "以下の項目をお選びください👩‍💻",
+    "FAQをご覧いただいても解決しない場合は「カスタマーサポートへ問い合わせる」を選択し、お困りの内容をお知らせください👩‍💻",
+    "以下の情報をお知らせください💭\n-------------------------------\nアカウントの登録メールアドレス：\n-------------------------------",
+    "スムーズなお問合せ対応のために連絡先をご入力ください。オフラインの際にSMSとメールに返信通知を送信します。\n\n(取得した個人情報はチャットに返信があったことを通知するためにのみ利用され、削除を要請するまで保有されます。入力しない場合は返信通知を受けることができません。)",
+    "大変恐れ入りますが、現在営業時間外のためお返事を差し上げることができかねます。\n営業再開後に順次回答をお送りしておりますのでお待ちくださいませ。\n※カスタマーサポートの営業時間は以下でございます。\n🕙平日 10時〜18時",
+    "最後にお悩みごとや気になること、ご相談したい内容をお知らせください💭\n専門の担当者が商品をご紹介いたします✨",
+    "まずはご希望のアイテムをお選びいただけますでしょうか👩‍💻",
+    "ストーリーズに返信しました",
+    "ストーリーズであなたをメンションしました",
+    "よくあるご質問"
+].map(s => s.trim())); // Trim each message for consistency
+
 // --- Type Definitions ---
 interface ChannelioEntity { plainText: string; personType?: string; personId?: string; chatId?: string; workflowButton?: boolean; options?: string[]; }
 interface ChannelioUser { name?: string; }
@@ -207,7 +221,8 @@ async function getLogilessAccessToken(): Promise<string | null> {
 }
 
 // --- Main Background Processing Function ---
-async function processUserQuery(payload: ChannelioWebhookPayload) {
+// Add skipAiProcessing parameter
+async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessing: boolean = false) {
     const query = payload.entity.plainText.trim();
     const customerName = payload.refers?.user?.name;
     const userId = payload.entity.personId;
@@ -334,33 +349,35 @@ async function processUserQuery(payload: ChannelioWebhookPayload) {
             console.log(`[LogilessProcessing] No valid order number found in query.`);
         }
 
-        // 3. Initialize Supabase Client (Anon Key)
-        step = "InitializationSupabase";
-        if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_ANON_KEY || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID) { throw new Error("Missing required environment variables."); }
-        supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { headers: { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } } });
-        console.log(`[${step}] Supabase client initialized.`);
+        // Conditionally skip AI-related steps
+        if (!skipAiProcessing) {
+            // 3. Initialize Supabase Client (Anon Key)
+            step = "InitializationSupabase";
+            if (!OPENAI_API_KEY || !SUPABASE_URL || !SUPABASE_ANON_KEY || !SLACK_CHANNEL_ID || !SLACK_ERROR_CHANNEL_ID) { throw new Error("Missing required environment variables."); }
+            supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { headers: { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } } });
+            console.log(`[${step}] Supabase client initialized.`);
 
-        // 4. Vectorize Query
-        step = "Vectorization";
-        const embeddingResponse = await fetch("https://api.openai.com/v1/embeddings", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify({ input: query, model: EMBEDDING_MODEL }), });
-        if (!embeddingResponse.ok) { const errorText = await embeddingResponse.text(); throw new Error(`OpenAI Embedding API request failed: ${embeddingResponse.status} ${errorText.substring(0, 200)}`); }
-        const embeddingData = await embeddingResponse.json();
-        queryEmbedding = embeddingData.data?.[0]?.embedding;
-        if (!queryEmbedding) { throw new Error("Failed to generate embedding."); }
-        console.log(`[${step}] Query vectorized.`);
+            // 4. Vectorize Query
+            step = "Vectorization";
+            const embeddingResponse = await fetch("https://api.openai.com/v1/embeddings", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify({ input: query, model: EMBEDDING_MODEL }), });
+            if (!embeddingResponse.ok) { const errorText = await embeddingResponse.text(); throw new Error(`OpenAI Embedding API request failed: ${embeddingResponse.status} ${errorText.substring(0, 200)}`); }
+            const embeddingData = await embeddingResponse.json();
+            queryEmbedding = embeddingData.data?.[0]?.embedding;
+            if (!queryEmbedding) { throw new Error("Failed to generate embedding."); }
+            console.log(`[${step}] Query vectorized.`);
 
-        // 5. Search Documents (RAG Retrieval)
-        step = "VectorSearch";
-        if (!supabase) throw new Error("Supabase client not initialized for Vector Search.");
-        const { data: documentsData, error: rpcError } = await supabase.rpc(RPC_FUNCTION_NAME, { query_embedding: queryEmbedding, match_threshold: MATCH_THRESHOLD, match_count: MATCH_COUNT });
-        if (rpcError) { throw new Error(`Vector search RPC error: ${rpcError.message}`); }
-        retrievedDocs = (documentsData as Document[]) || [];
-        referenceInfo = retrievedDocs.length > 0 ? retrievedDocs.map(doc => `- ${doc.content}`).join('\n') : '関連ドキュメントは見つかりませんでした。';
-        console.log(`[${step}] Vector search completed. Found ${retrievedDocs.length} documents.`);
+            // 5. Search Documents (RAG Retrieval)
+            step = "VectorSearch";
+            if (!supabase) throw new Error("Supabase client not initialized for Vector Search.");
+            const { data: documentsData, error: rpcError } = await supabase.rpc(RPC_FUNCTION_NAME, { query_embedding: queryEmbedding, match_threshold: MATCH_THRESHOLD, match_count: MATCH_COUNT });
+            if (rpcError) { throw new Error(`Vector search RPC error: ${rpcError.message}`); }
+            retrievedDocs = (documentsData as Document[]) || [];
+            referenceInfo = retrievedDocs.length > 0 ? retrievedDocs.map(doc => `- ${doc.content}`).join('\n') : '関連ドキュメントは見つかりませんでした。';
+            console.log(`[${step}] Vector search completed. Found ${retrievedDocs.length} documents.`);
 
-        // 6. Generate AI Response (RAG Generation)
-        step = "AICreation";
-        const prompt = `
+            // 6. Generate AI Response (RAG Generation)
+            step = "AICreation";
+            const prompt = `
 # あなたの役割
 （省略）
 # 顧客情報・コンテキスト
@@ -382,24 +399,38 @@ ${referenceInfo}
 ${query}
 \\\`\\\`\\\`
 回答案:
-        `.trim();
-        const completionPayload = { model: COMPLETION_MODEL, messages: [{ role: "user", content: prompt }], temperature: 0.5 };
-        const completionResponse = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(completionPayload) });
-        if (!completionResponse.ok) { const errorText = await completionResponse.text(); throw new Error(`OpenAI Chat Completion API request failed: ${completionResponse.status} ${errorText.substring(0, 200)}`); }
-        const completionData = await completionResponse.json();
-        aiResponse = completionData.choices?.[0]?.message?.content?.trim() || "(AIからの応答が空でした)";
-        console.log(`[${step}] AI response generated.`);
+            `.trim();
+            const completionPayload = { model: COMPLETION_MODEL, messages: [{ role: "user", content: prompt }], temperature: 0.5 };
+            const completionResponse = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(completionPayload) });
+            if (!completionResponse.ok) { const errorText = await completionResponse.text(); throw new Error(`OpenAI Chat Completion API request failed: ${completionResponse.status} ${errorText.substring(0, 200)}`); }
+            const completionData = await completionResponse.json();
+            aiResponse = completionData.choices?.[0]?.message?.content?.trim() || "(AIからの応答が空でした)";
+            console.log(`[${step}] AI response generated.`);
+        } else {
+             console.log("[AIProcessing] Skipping AI steps based on skipAiProcessing flag.");
+             // Ensure Supabase is initialized if needed for Slack utils, even if AI is skipped
+             // Note: Slack utils currently don't require Supabase client directly, but good practice
+             if (!supabase && (SLACK_CHANNEL_ID || SLACK_ERROR_CHANNEL_ID)) { // Check if Slack notification might happen
+                 step = "InitializationSupabaseForSlack";
+                 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) { console.warn("Missing Supabase URL/Key for potential Slack operations."); }
+                 else {
+                     supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { headers: { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } } });
+                     console.log(`[${step}] Supabase client initialized (minimal for Slack).`);
+                 }
+             }
+        }
 
         // 7. Post Results to Slack
         step = "SlackNotify";
-        const blocks = [
+        // Base blocks (Header, Customer Info, Logiless, Query)
+        const baseBlocks = [
             { "type": "header", "text": { "type": "plain_text", "text": ":loudspeaker: 新しい問い合わせがありました", "emoji": true } },
             { "type": "section", "fields": [
                  { "type": "mrkdwn", "text": `*顧客名:* ${customerName || '不明'}` },
                  // { "type": "mrkdwn", "text": `*UserID:* ${userId || '不明'}` }, // UserIDは一旦省略
                  { "type": "mrkdwn", "text": `*Channelioリンク:* ${chatId ? `<https://yeni-beauty.channel.io/user-chats/${chatId}|チャットを開く>` : '不明'}` } // ★ ドメイン修正 ★
             ] },
-            // --- Logiless Section (Moved Up) ---
+            // --- Logiless Section ---
             { "type": "divider" },
             { "type": "section", "text": { "type": "mrkdwn", "text": "*<https://app2.logiless.com/|ロジレス連携結果>*" } },
             { "type": "section", "fields": [ { "type": "mrkdwn", "text": `*注文番号:* ${orderNumber || 'N/A'}` }, { "type": "mrkdwn", "text": `*情報ステータス:* ${logilessOrderInfo || '連携なし/失敗'}` } ]},
@@ -408,15 +439,34 @@ ${query}
             // --- End of Logiless Section ---
             { "type": "divider" },
             { "type": "section", "text": { "type": "mrkdwn", "text": `*問い合わせ内容:*` } },
-            { "type": "section", "text": { "type": "mrkdwn", "text": `\`\`\`\n${query}\n\`\`\`` } },
-            { "type": "divider" },
-            { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } },
-        	{ "type": "section", "text": { "type": "mrkdwn", "text": `\`\`\`\n${aiResponse}\n\`\`\`` } }
+            { "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`\\n${query}\\n\\\`\\\`\\\`` } }
+            // AI Section is added conditionally below
         ];
+
+        let finalBlocks = [...baseBlocks];
+
+        // Conditionally add AI section
+        if (!skipAiProcessing && aiResponse) {
+             finalBlocks.push(
+                { "type": "divider" },
+                { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } },
+                { "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`\\n${aiResponse}\\n\\\`\\\`\\\`` } }
+            );
+        } else if (!skipAiProcessing && !aiResponse) {
+            // Handle case where AI processing was intended but failed/returned empty
+             finalBlocks.push(
+                { "type": "divider" },
+                { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } },
+                { "type": "section", "text": { "type": "mrkdwn", "text": "_(AI処理スキップまたは応答生成失敗)_" } }
+             );
+        }
+        // If skipAiProcessing is true, no AI section is added.
+
         const fallbackText = `新規問い合わせ: ${query.substring(0, 50)}... (顧客: ${customerName || '不明'})`;
 
         // ★ スレッドIDを渡し、戻り値を受け取る ★
-        const newMessageTs = await postToSlack(SLACK_CHANNEL_ID, fallbackText, blocks, existingThreadTs ?? undefined);
+        // Use finalBlocks here
+        const newMessageTs = await postToSlack(SLACK_CHANNEL_ID, fallbackText, finalBlocks, existingThreadTs ?? undefined);
 
         // ★ 新規スレッドならDB保存 ★
         if (chatId && newMessageTs && !existingThreadTs) {
@@ -456,6 +506,7 @@ serve(async (req: Request) => {
         const messageType = payload.type;
 
         let skipReason: string | null = null;
+        let triggerNotificationOnly = false; // Flag for notify-only messages
 
         if (eventType !== 'push' || messageType !== 'message') { skipReason = `Not a message push event (event: ${eventType}, type: ${messageType})`; }
         else if (!messageText) { skipReason = "empty message"; }
@@ -470,6 +521,12 @@ serve(async (req: Request) => {
             const foundKeyword = IGNORED_KEYWORDS.find(keyword => messageText.includes(keyword));
             skipReason = `ignored keyword: ${foundKeyword}`;
         }
+        // ★★★ Check for Notify Only Messages AFTER other filters ★★★
+        else if (messageText && NOTIFY_ONLY_MESSAGES.has(messageText)) {
+            triggerNotificationOnly = true;
+            console.log(`[Filter] Identified as notify-only message: "${messageText.substring(0, 50)}..."`);
+            // Not setting skipReason here, as we want to proceed to background processing
+        }
 
         if (skipReason) {
             console.log(`[Filter] Skipping webhook processing: ${skipReason}`);
@@ -481,7 +538,8 @@ serve(async (req: Request) => {
         // 4. Trigger Background Processing
         globalThis.setTimeout(async () => {
             try {
-                await processUserQuery(payload);
+                // Pass the flag to processUserQuery
+                await processUserQuery(payload, triggerNotificationOnly);
             } catch (e) {
                 console.error("Unhandled background error during processUserQuery invocation/execution:", e);
                 const queryFromPayload = payload?.entity?.plainText;
