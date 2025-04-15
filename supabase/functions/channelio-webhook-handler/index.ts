@@ -49,6 +49,7 @@ const INITIAL_BOT_GREETING = `こんにちは。yeniカスタマーサポート�
 const IGNORED_KEYWORDS: string[] = [
     "【新生活応援キャンペーン】",
     "ランドリーポーチ",
+    "【4/14（月）先行予約販売開始】ノンワイヤーブラ、ショーツ再入荷と新サイズ登場✨️",
     // 他に通知を止めたいキーワードがあれば追加
 ];
 
@@ -470,6 +471,46 @@ ${query}
         // If skipAiProcessing is true, no AI section is added.
 
         const fallbackText = `新規問い合わせ: ${unescapedQuery.substring(0, 50)}... (顧客: ${customerName || '不明'})`;
+
+        // ★★★ アクションボタンを追加 ★★★
+        // valueにはJSON文字列を埋め込む (文字数制限に注意)
+        // threadTsはこの時点では確定していない可能性があるため、ハンドラ側で取得する前提とする
+        const feedbackContextValue = JSON.stringify({
+            originalQuery: unescapedQuery,
+            chatId: chatId
+            // threadTs は slack-interactive-handler 側で payload から取得する
+        });
+
+        // ボタンは skipAiProcessing フラグに関わらず表示する
+        finalBlocks.push(
+            { "type": "divider" },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "今後AIの回答を生成しない",
+                            "emoji": true
+                        },
+                        "action_id": "ignore_ai_button",
+                        "value": feedbackContextValue.substring(0, 2000) // Ensure value is within limit
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "今後通知不要",
+                            "emoji": true
+                        },
+                        "action_id": "ignore_notification_button",
+                        "style": "danger",
+                        "value": feedbackContextValue.substring(0, 2000) // Ensure value is within limit
+                    }
+                ]
+            }
+        );
 
         // ★ スレッドIDを渡し、戻り値を受け取る ★
         // Use finalBlocks here
