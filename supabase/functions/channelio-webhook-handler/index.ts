@@ -435,7 +435,7 @@ ${query}
             { "type": "section", "fields": [
                  { "type": "mrkdwn", "text": `*顧客名:* ${customerName || '不明'}` },
                  // { "type": "mrkdwn", "text": `*UserID:* ${userId || '不明'}` }, // UserIDは一旦省略
-                 { "type": "mrkdwn", "text": `*Channelioリンク:* ${chatId ? `<https://yeni-beauty.channel.io/user-chats/${chatId}|チャットを開く>` : '不明'}` } // ★ ドメイン修正 ★
+                 { "type": "mrkdwn", "text": `*Channelioリンク:* ${chatId ? `<https://desk.channel.io/#/channels/96452/user_chats//${chatId}|チャットを開く>` : '不明'}` } // Use new URL format
             ] },
             // --- Logiless Section ---
             { "type": "divider" },
