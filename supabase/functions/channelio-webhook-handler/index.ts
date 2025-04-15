@@ -422,6 +422,13 @@ ${query}
 
         // 7. Post Results to Slack
         step = "SlackNotify";
+
+        // ★★★ Unescape backslashes and newlines for proper Slack mrkdwn rendering ★★★
+        // Replace literal \n with newline character
+        // Replace literal \\ with single \
+        const unescapedQuery = query.replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
+        const unescapedAiResponse = aiResponse ? aiResponse.replace(/\\n/g, '\n').replace(/\\\\/g, '\\') : null;
+
         // Base blocks (Header, Customer Info, Logiless, Query)
         const baseBlocks = [
             { "type": "header", "text": { "type": "plain_text", "text": ":loudspeaker: 新しい問い合わせがありました", "emoji": true } },
@@ -439,20 +446,20 @@ ${query}
             // --- End of Logiless Section ---
             { "type": "divider" },
             { "type": "section", "text": { "type": "mrkdwn", "text": `*問い合わせ内容:*` } },
-            { "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`\\n${query}\\n\\\`\\\`\\\`` } }
+            { "type": "section", "text": { "type": "mrkdwn", "text": `\`\`\`\n${unescapedQuery}\n\`\`\`` } }
             // AI Section is added conditionally below
         ];
 
         let finalBlocks = [...baseBlocks];
 
         // Conditionally add AI section
-        if (!skipAiProcessing && aiResponse) {
+        if (!skipAiProcessing && unescapedAiResponse) {
              finalBlocks.push(
                 { "type": "divider" },
                 { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } },
-                { "type": "section", "text": { "type": "mrkdwn", "text": `\\\`\\\`\\\`\\n${aiResponse}\\n\\\`\\\`\\\`` } }
+                { "type": "section", "text": { "type": "mrkdwn", "text": `\`\`\`\n${unescapedAiResponse}\n\`\`\`` } }
             );
-        } else if (!skipAiProcessing && !aiResponse) {
+        } else if (!skipAiProcessing && !unescapedAiResponse) {
             // Handle case where AI processing was intended but failed/returned empty
              finalBlocks.push(
                 { "type": "divider" },
@@ -462,7 +469,7 @@ ${query}
         }
         // If skipAiProcessing is true, no AI section is added.
 
-        const fallbackText = `新規問い合わせ: ${query.substring(0, 50)}... (顧客: ${customerName || '不明'})`;
+        const fallbackText = `新規問い合わせ: ${unescapedQuery.substring(0, 50)}... (顧客: ${customerName || '不明'})`;
 
         // ★ スレッドIDを渡し、戻り値を受け取る ★
         // Use finalBlocks here
