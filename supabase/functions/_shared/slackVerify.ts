@@ -165,3 +165,16 @@ serve(async (req: Request) => {
 });
 
 console.log("Slack interactive handler function started.");
+
+/**
+ * @returns {Promise<boolean>} True if the request is verified, false otherwise.
+ */
+export async function verifySlackRequest(
+    req: Request,
+    rawBody: Uint8Array,
+    signingSecret: string
+): Promise<boolean> {
+    // Implementation of verifySlackRequest function
+    // This is a placeholder and should be replaced with the actual implementation
+    return true; // Placeholder return, actual implementation needed
+}
