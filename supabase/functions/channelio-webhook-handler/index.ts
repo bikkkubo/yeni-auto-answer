@@ -11,7 +11,7 @@ import { getActiveThreadTs, saveThreadTs } from '../_shared/slackUtils.ts';
 // ★ postToSlack も slackUtils.ts に移動したと仮定してインポート ★
 import { postToSlack } from '../_shared/slackUtils.ts';
 // ★ Service Role Client を使う場合 (DB操作関数内で使われているはず) ★
-// import { getServiceRoleClient } from '../_shared/supabaseClient.ts';
+import { getServiceRoleClient } from '../_shared/supabaseClient.ts';
 
 // --- Constants Definition ---
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
@@ -38,6 +38,13 @@ const RPC_FUNCTION_NAME = "match_documents";
 const OPERATOR_PERSON_TYPES: Set<string> = new Set(['manager']);
 const BOT_PERSON_TYPE = 'bot';
 const IGNORED_BOT_MESSAGES: Set<string> = new Set([ /* 必要なら追加 */ ]);
+// ★★★ Specific Bot Greeting to Ignore ★★★
+const INITIAL_BOT_GREETING = `こんにちは。yeniカスタマーサポートです👩‍💻
+お問い合わせ内容をお選びください。
+
+🕙営業時間：平日10:00-18:00
+※休業期間中や土日祝日などの営業時間外にはお返事を差し上げることができませんのでご注意ください。🙅‍♀️`.trim(); // Use trim to match the already trimmed messageText
+
 // ★★★ NGキーワードリスト ★★★
 const IGNORED_KEYWORDS: string[] = [
     "【新生活応援キャンペーン】",
@@ -104,18 +111,47 @@ async function notifyError(step: string, error: any, context: { query?: string; 
     }
 }
 
-// ★★★ Logiless Access Token Helper (Method A - ボディにSecret版) ★★★
+// ★★★ Logiless Access Token Helper (DB Refresh Token Update Version) ★★★
 async function getLogilessAccessToken(): Promise<string | null> {
     const step = "LogilessAuthToken";
-    if (!LOGILESS_CLIENT_ID || !LOGILESS_CLIENT_SECRET || !LOGILESS_REFRESH_TOKEN) {
-        console.error(`[${step}] Logiless client credentials or refresh token is not set.`);
-        throw new Error("Logiless refresh token or client credentials are not configured.");
+    const supabase = getServiceRoleClient(); // ★ Service Role Client を使用 ★
+
+    if (!LOGILESS_CLIENT_ID || !LOGILESS_CLIENT_SECRET) { // Refresh token check removed from here
+        console.error(`[${step}] Logiless client ID or secret is not set.`);
+        throw new Error("Logiless client credentials are not configured.");
     }
+
+    // 1. DBから現在のリフレッシュトークンを取得 ★★★
+    let currentRefreshToken: string | null = null;
+    try {
+        const { data: tokenRow, error: selectError } = await supabase
+            .from('logiless_auth')
+            .select('refresh_token')
+            .eq('id', 1) // 固定ID=1の行を想定
+            .single();
+
+        // PGRST116: No rows found - Treat as error because token should exist
+        if (selectError) {
+            throw selectError;
+        }
+        if (!tokenRow?.refresh_token) {
+            throw new Error("Refresh token not found or is null in the database (id=1).");
+        }
+        currentRefreshToken = tokenRow.refresh_token;
+        console.log(`[${step}] Retrieved current refresh token from DB.`);
+    } catch (dbError) {
+        console.error(`[${step}] Failed to retrieve refresh token from DB:`, dbError);
+        // DBから取得できないのは致命的エラーとして扱う
+        await notifyError(step, dbError, { query: 'N/A', userId: 'System', orderNumber: null, chatId: null });
+        throw new Error(`Failed to retrieve refresh token from DB: ${dbError.message}`);
+    }
+
+    // 2. トークン発行API呼び出し (Method A: secret in body) ★★★
     try {
         console.log(`[${step}] Requesting Logiless access token using refresh token (secret in body) from ${LOGILESS_TOKEN_ENDPOINT}...`);
         const bodyA = new URLSearchParams({
             grant_type: 'refresh_token',
-            refresh_token: LOGILESS_REFRESH_TOKEN,
+            refresh_token: currentRefreshToken, // ★ DBから取得したトークンを使用 ★
             client_id: LOGILESS_CLIENT_ID,
             client_secret: LOGILESS_CLIENT_SECRET
         });
@@ -124,26 +160,48 @@ async function getLogilessAccessToken(): Promise<string | null> {
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: bodyA.toString()
         });
+
         if (responseA.ok) {
             const tokenData: LogilessTokenResponse = await responseA.json();
             if (tokenData.access_token) {
                 console.log(`[${step}] Token obtained successfully.`);
-                return tokenData.access_token;
+
+                // 3. 新しいリフレッシュトークンをDBに保存 ★★★
+                if (tokenData.refresh_token && tokenData.refresh_token !== currentRefreshToken) {
+                    try {
+                        const { error: updateError } = await supabase
+                            .from('logiless_auth')
+                            .update({ refresh_token: tokenData.refresh_token, updated_at: new Date().toISOString() })
+                            .eq('id', 1); // id=1 の行を更新
+                        if (updateError) { throw updateError; }
+                        console.log(`[${step}] Successfully updated refresh token in DB.`);
+                    } catch (updateDbError) {
+                        console.error(`[${step}] Failed to update refresh token in DB:`, updateDbError);
+                        // DB更新失敗をエラー通知するが、処理は続行（アクセストークンは取得済み）
+                        await notifyError("RefreshTokenUpdateFailed", updateDbError, { query: 'N/A', userId: 'System', orderNumber: null, chatId: null });
+                    }
+                } else {
+                     console.log(`[${step}] No new refresh token received or it's the same. DB not updated.`);
+                }
+
+                return tokenData.access_token; // ★ アクセストークンを返す ★
             } else {
-                 throw new Error("Method A: Invalid token response structure.");
+                 throw new Error("Method A: Invalid token response structure (missing access_token).");
             }
         } else {
+            // Method A failed
             const errorStatusA = responseA.status;
             const errorTextA = await responseA.text();
             let detailedErrorMessage = `Logiless token request failed with status ${errorStatusA}: ${errorTextA.substring(0, 200)}`;
-            if (errorTextA.toLowerCase().includes("invalid_grant")) { detailedErrorMessage += "\\nPOSSIBLE CAUSE: Refresh token invalid/expired/revoked."; }
+            if (errorTextA.toLowerCase().includes("invalid_grant")) { detailedErrorMessage += "\\nPOSSIBLE CAUSE: Refresh token in DB invalid/expired/revoked."; }
             else if (errorTextA.toLowerCase().includes("invalid_client")) { detailedErrorMessage += "\\nPOSSIBLE CAUSE: Client ID/Secret incorrect."; }
             else if (errorTextA.toLowerCase().includes("unsupported_grant_type")) { detailedErrorMessage += "\\nPOSSIBLE CAUSE: 'refresh_token' grant type not supported."; }
             console.error(`[${step}] Failed to get Logiless access token. Response:`, errorTextA);
             throw new Error(detailedErrorMessage);
         }
-    } catch (error) {
+    } catch (error) { // Catch errors from fetch or explicit throws
         console.error(`[${step}] Unexpected error getting Logiless access token:`, error);
+        // Throw a final error indicating failure
         throw new Error(`Failed to obtain Logiless token. Error: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
@@ -341,13 +399,16 @@ ${query}
                  // { "type": "mrkdwn", "text": `*UserID:* ${userId || '不明'}` }, // UserIDは一旦省略
                  { "type": "mrkdwn", "text": `*Channelioリンク:* ${chatId ? `<https://yeni-beauty.channel.io/user-chats/${chatId}|チャットを開く>` : '不明'}` } // ★ ドメイン修正 ★
             ] },
-            { "type": "section", "text": { "type": "mrkdwn", "text": `*問い合わせ内容:*` } },
-            { "type": "section", "text": { "type": "mrkdwn", "text": `\`\`\`\n${query}\n\`\`\`` } },
+            // --- Logiless Section (Moved Up) ---
             { "type": "divider" },
             { "type": "section", "text": { "type": "mrkdwn", "text": "*<https://app2.logiless.com/|ロジレス連携結果>*" } },
             { "type": "section", "fields": [ { "type": "mrkdwn", "text": `*注文番号:* ${orderNumber || 'N/A'}` }, { "type": "mrkdwn", "text": `*情報ステータス:* ${logilessOrderInfo || '連携なし/失敗'}` } ]},
             (logilessOrderUrl ? { "type": "actions" as const, "elements": [{ "type": "button" as const, "text": { "type": "plain_text" as const, "text": "ロジレスで詳細を確認", "emoji": true }, "url": logilessOrderUrl, "style": "primary" as const, "action_id": "logiless_link_button" }] }
                             : { "type": "context" as const, "elements": [ { "type": "mrkdwn" as const, "text": "ロジレス詳細URL: なし" } ] }),
+            // --- End of Logiless Section ---
+            { "type": "divider" },
+            { "type": "section", "text": { "type": "mrkdwn", "text": `*問い合わせ内容:*` } },
+            { "type": "section", "text": { "type": "mrkdwn", "text": `\`\`\`\n${query}\n\`\`\`` } },
             { "type": "divider" },
             { "type": "section", "text": { "type": "mrkdwn", "text": "*AIによる回答案:*" } },
         	{ "type": "section", "text": { "type": "mrkdwn", "text": `\`\`\`\n${aiResponse}\n\`\`\`` } }
@@ -400,6 +461,9 @@ serve(async (req: Request) => {
         else if (!messageText) { skipReason = "empty message"; }
         else if (entity?.options?.includes("private")) { skipReason = "private message"; }
         else if (personType && OPERATOR_PERSON_TYPES.has(personType)) { skipReason = `operator message (type: ${personType})`; }
+        // ★★★ Add check for the specific initial bot greeting ★★★
+        else if (messageText === INITIAL_BOT_GREETING) { skipReason = "initial bot greeting"; }
+        // ★★★ End of added check ★★★
         else if (personType === BOT_PERSON_TYPE && messageText && IGNORED_BOT_MESSAGES.has(messageText)) { skipReason = "ignored bot message"; }
         else if (entity?.workflowButton) { skipReason = "workflow button"; }
         else if (messageText && IGNORED_KEYWORDS.some(keyword => messageText.includes(keyword))) {
