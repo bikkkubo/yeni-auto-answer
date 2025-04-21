@@ -29,7 +29,7 @@ const LOGILESS_MERCHANT_ID = Deno.env.get("LOGILESS_MERCHANT_ID"); // ★ 要設
 
 // OpenAI/RAG Constants
 const EMBEDDING_MODEL = "text-embedding-3-small";
-const COMPLETION_MODEL = "gpt-4o-mini";
+const COMPLETION_MODEL = "o4-mini-2025-04-16";
 const MATCH_THRESHOLD = 0.7;
 const MATCH_COUNT = 3;
 const RPC_FUNCTION_NAME = "match_documents";
@@ -436,7 +436,7 @@ ${query}
             { "type": "section", "fields": [
                  { "type": "mrkdwn", "text": `*顧客名:* ${customerName || '不明'}` },
                  // { "type": "mrkdwn", "text": `*UserID:* ${userId || '不明'}` }, // UserIDは一旦省略
-                 { "type": "mrkdwn", "text": `*Channelioリンク:* ${chatId ? `<https://desk.channel.io/#/channels/96452/user_chats//${chatId}|チャットを開く>` : '不明'}` } // Use new URL format
+                 { "type": "mrkdwn", "text": `*Channelioリンク:* ${chatId ? `<https://desk.channel.io/#/channels/96452/user_chats/${chatId}|チャットを開く>` : '不明'}` } // Use new URL format
             ] },
             // --- Logiless Section ---
             { "type": "divider" },

@@ -1,78 +1,84 @@
-# Yeni Auto V2 - タスクリスト
+# RAG システム改善 タスクリスト
 
-## フェーズ1: 注文番号抽出とLogiless連携 (OAuth 2.0)
+## フェーズ 1: 基盤改善 (検索精度向上)
 
--   [X] **目標:** Channel.ioメッセージから注文番号を抽出し、Logiless APIで注文情報を取得(OAuth 2.0認証を使用)、AIプロンプトとSlack通知に情報を追加する。
--   [X] **基盤:** `supabase/functions/channelio-webhook-handler/index.ts` を変更。
--   [X] **注文番号抽出:** 正規表現で `#?yeni-12345` 形式の番号を抽出するロジックを実装・確認。
--   [ ] **Logiless API連携 (OAuth 2.0):**
-    -   [X] `LOGILESS_CLIENT_ID`, `LOGILESS_CLIENT_SECRET` を Supabase Secrets に設定済。
-    -   [X] アクセストークン取得ヘルパー関数 `getLogilessAccessToken` を `index.ts` に追加 (Basic認証ヘッダー生成、トークン取得リクエスト)。
-    -   [ ] **TODO:** トークン発行エンドポイントURL (`LOGILESS_TOKEN_URL` 定数) をLogilessドキュメントで**確認・修正**。
-    -   [ ] `processUserQuery` 関数内で `getLogilessAccessToken` を呼び出し。
-    -   [ ] 取得したアクセストークンを `Authorization: Bearer <トークン>` ヘッダーに設定して注文情報APIを呼び出す。
-    -   [ ] **TODO:** 注文情報取得APIエンドポイントURL (`logilessApiUrl` 変数) とクエリパラメータ (`code=...`) をLogilessドキュメントで**確認・修正**。
-    -   [ ] **TODO:** 注文情報取得APIのHTTPメソッド (`GET`) をLogilessドキュメントで**確認**。
-    -   [ ] **TODO:** 注文情報取得APIレスポンス形式 (`LogilessOrderData` 型、配列か単一オブジェクトか) をLogilessドキュメントで**確認**し、情報抽出ロジック (`find` 条件など) を**修正**。
-    -   [ ] **TODO:** ロジレス詳細URLの取得 (`details_url`) または組み立てロジック (`LOGILESS_MERCHANT_ID` 要否含む) をLogilessドキュメントで**確認・修正**。
-    -   [ ] エラーハンドリング (トークン取得失敗、API 401/404/5xxエラー) を実装・確認。
--   [ ] **index.ts への統合:**
-    -   [ ] 注文番号が見つかった場合に Logiless 認証・API呼び出しを行うように `processUserQuery` を修正。(OAuth対応)
--   [ ] **AIプロンプト拡張:**
-    -   [ ] AIプロンプトにLogiless連携結果（成功、失敗、認証失敗など）を反映。
-    -   [ ] 回答ガイドライン（注文関連）がLogiless情報を考慮しているか確認。
--   [ ] **Slack通知拡張:**
-    -   [ ] Slack Block KitにLogiless情報とURL（または失敗情報）を反映。
--   [ ] **環境変数確認:**
-    -   [ ] (任意) `LOGILESS_MERCHANT_ID` が必要か確認し、必要なら設定。
--   [ ] **テスト:**
-    -   [ ] `getLogilessAccessToken` の単体テストを作成・実行。
-    -   [ ] 注文情報取得部分のロジックを (可能であればモックを使って) テスト。
-    -   [ ] 統合テストでLogiless連携を含む一連の流れを確認。
--   [ ] **デプロイと動作確認:**
-    -   [ ] Supabase Edge Function をデプロイ。
-    -   [ ] 実際のChannel.io Webhook (注文番号を含む/含まない) で動作を確認。
-    -   [ ] Logiless API との連携を実環境で確認 (成功/失敗ケース)。
-    -   [ ] AI回答案とSlack通知の内容を確認。
-    -   [ ] エラーハンドリングと通知を実環境で確認。
--   [ ] **ドキュメント更新:** READMEや関連ドキュメントを更新。
+### 1. FAQ データチャンキング戦略の策定と実装
+    - [ ] **調査・設計:**
+        - [ ] チャンク化の単位決定（例: 質問 + 回答1段落、≈400トークン目標）
+        - [ ] チャンク境界の定義方法（例: 改行、特定の区切り文字）
+        - [ ] メタデータ（カテゴリ、タグ）の付与戦略決定
+        - [ ] 既存データ移行計画の策定
+    - [ ] **実装:**
+        - [ ] FAQデータをチャンキングする前処理スクリプト（Deno or Node.js）を作成
+        - [ ] チャンク化されたデータを格納するための新しいSupabaseテーブルスキーマ定義 (例: `faq_chunks`, カラム: `id`, `content`, `embedding vector`, `metadata jsonb`, `original_faq_id integer`)
+        - [ ] 既存FAQデータを新スキーマに移行するスクリプト作成・実行
+        - [ ] 新規FAQデータ取り込み時のチャンキング処理組み込み（既存の取り込みプロセスがあれば修正）
+    - [ ] **テスト:**
+        - [ ] チャンキング処理が意図通り動作することを確認
+        - [ ] 移行データの内容を確認
 
-## フェーズ2: AI回答案のChannel.ioへの投稿
+### 2. ハイブリッド検索の実装 (ベクトル検索 + キーワード検索)
+    - [ ] **調査・設計:**
+        - [ ] PostgreSQL全文検索 (`tsvector`, `tsquery`, `ts_rank`) の利用方法調査 (日本語対応含む - `pg_bigm` 拡張など)
+        - [ ] ベクトル検索スコア (cosine類似度) とキーワード検索スコア (BM25 or `ts_rank`) の統合方法検討 (重み付け係数決定: 例 0.6 / 0.4)
+        - [ ] Supabase Function (RPC) でベクトル検索とキーワード検索を同時に実行し、スコアを統合するロジック設計
+    - [ ] **実装:**
+        - [ ] `faq_chunks` テーブルに全文検索用インデックス (`tsvector`) を追加
+        - [ ] ベクトル検索とキーワード検索を実行し、結果を統合するSupabase Function (RPC) を作成または修正 (例: `hybrid_search_faq_chunks`)
+        - [ ] Channelio Webhook Handler (`index.ts`) から新しいRPCを呼び出すように修正
+    - [ ] **テスト:**
+        - [ ] 様々なクエリ（同義語、表記揺れ含む）で検索精度が向上することを確認
+        - [ ] スコア統合ロジックと重み付けが期待通り機能することを確認
 
--   [X] **目標:** AIが生成した回答案を、Slack通知に加えて、元のChannel.ioチャットスレッドにプライベートメッセージとして投稿する。
--   [X] **環境変数:** `CHANNELIO_ACCESS_KEY`, `CHANNELIO_ACCESS_SECRET`, (任意)`CHANNELIO_BOT_PERSON_ID` 設定済。
--   [X] **`_shared/channelio.ts` の `sendChannelioPrivateMessage` 関数更新:** (内容は別ファイルで管理されている前提)
-    -   [X] Channel.io API (`POST /open/v5/user_chats/{chatId}/messages`) 呼び出しロジック実装済。
-    -   [X] `private` オプション、`personId` 指定に対応済。
--   [X] **`index.ts` への統合 (AI回答案投稿):**
-    -   [X] `processUserQuery` 内で `sendChannelioPrivateMessage` を呼び出し。
-    -   [X] 必要な引数 (`chatId`, `message`, APIキー, `personId`) を渡す。
-    -   [X] エラーハンドリングとログ出力。
--   [ ] **テスト:** (Logiless連携後に実施)
-    -   [ ] Webhookをトリガーし、AI回答案がプライベートメッセージとして投稿されることを確認。
-    -   [ ] `CHANNELIO_BOT_PERSON_ID` 設定時の動作を確認。
-    -   [ ] エラーケースでのログ出力を確認。
--   [ ] **デプロイと動作確認:** (Logiless連携後に実施)
-    -   [ ] Supabase Edge Function をデプロイ。
-    -   [ ] デプロイ後のログを監視し、動作を確認。
+## フェーズ 2: 応答品質向上と応用
 
-## Channel.io Webhook Slack スレッド化
+### 3. HyDE (Hypothetical Document Embeddings) の導入
+    - [ ] **調査・設計:**
+        - [ ] HyDE の効果と実装方法の再確認
+        - [ ] Channelio Webhook Handler (`index.ts`) 内で、ユーザー質問から疑似文書を生成するプロンプト設計 (OpenAI API呼び出し)
+    - [ ] **実装:**
+        - [ ] `index.ts` に OpenAI API (Chat Completions) を呼び出して疑似文書を生成する処理を追加
+        - [ ] 生成された疑似文書の Embedding を取得する処理を追加 (OpenAI Embeddings API)
+        - [ ] 取得した Embedding を使ってハイブリッド検索 (RPC) を実行するように修正
+    - [ ] **テスト:**
+        - [ ] HyDE導入前後で、特に抽象的または長文の質問に対する検索精度が向上するか評価
 
--   [X] **Supabase テーブル作成:** `slack_thread_store` 作成済。
--   [X] **型定義の更新:** `postToSlack`, `SlackThreadInfo`, Channel.io関連型 更新済。
--   [X] **ストア操作関数の実装:** `getActiveThreadTs`, `saveThreadTs` 実装済。
--   [X] **`postToSlack` 関数の修正:** `thread_ts` 対応、戻り値修正済。
--   [X] **`index.ts` / `processUserQuery` への統合:** スレッド確認・保存ロジック実装済。
--   [X] **環境変数の設定確認:** `SUPABASE_SERVICE_ROLE_KEY` 使用確認済。
--   [ ] **デプロイとテスト:**
-    -   [ ] 修正したコードをデプロイします (`supabase functions deploy ...`)。
-    -   [ ] Channel.io からテスト Webhook を送信し、Slack でスレッド化・有効期限を確認します。
-    -   [ ] **担当:** ユーザー
+### 4. プロンプトエンジニアリングによる応答文体改善
+    - [ ] **調査・設計:**
+        - [ ] AAAフレームワーク（共感→回答→気遣い）に基づいた具体的なシステムプロンプト文案作成
+        - [ ] 生成温度などのパラメータ調整方針検討 (例: 温度0.7で草稿→温度0.3でリライトは高度なため、まずは単一生成で調整)
+    - [ ] **実装:**
+        - [ ] `index.ts` 内の OpenAI API (Chat Completions) 呼び出し箇所で、システムプロンプトを修正
+        - [ ] 必要に応じて生成パラメータ (temperature等) を調整
+    - [ ] **テスト:**
+        - [ ] 生成される回答のトーンがより温かく、丁寧になることを確認
+        - [ ] AAAフレームワークが応答に反映されているか確認
 
-## その他
+### 5. (任意) 高性能モデルへの切り替え検討
+    - [ ] **評価:**
+        - [ ] GPT-3.5-turbo での改善限界を評価
+        - [ ] GPT-4o などの上位モデル利用時のコストと性能向上のトレードオフを評価
+    - [ ] **実装 (実施する場合):**
+        - [ ] `index.ts` 内のモデル指定箇所 (`gpt-3.5-turbo`) を変更
 
--   [ ] **リンターエラー対応:** Deno環境起因と思われるエラーは無視、それ以外は修正。
--   [ ] **依存関係:** `base64.ts` インポート確認。
+## フェーズ 3: 評価と継続的改善
 
----
-最終更新: 2024-06-10 (更新日時は手動更新) 
+### 6. 評価指標の定義と計測設定
+    - [ ] **設計:**
+        - [ ] 評価指標の具体化 (例: Top-3 検索ヒット率、回答のHelpful/Warmthスコア評価方法)
+        - [ ] ユーザー問い合わせ、検索結果、生成回答、ユーザーフィードバック（もしあれば）を記録するログテーブルスキーマ設計 (Supabase)
+        - [ ] スコア計測方法の検討（手動評価 or 自動評価の一部導入）
+    - [ ] **実装:**
+        - [ ] `index.ts` にログデータをSupabaseテーブルに保存する処理を追加
+        - [ ] 定期的にログを集計・分析する仕組みを検討（手動 or 簡単なスクリプト）
+    - [ ] **テスト:**
+        - [ ] ログが正しく記録されることを確認
+
+### 7. ドキュメント更新
+    - [ ] README.md に以下を追記・更新:
+        - [ ] 新しいアーキテクチャ概要 (チャンキング、ハイブリッド検索)
+        - [ ] 新しく追加された環境変数
+        - [ ] データ投入・前処理スクリプトの実行方法
+        - [ ] 新しいSupabaseテーブルスキーマとRPC
+        - [ ] 評価指標とログの確認方法
+    - [ ] `TASKS.md` の完了ステータスを更新 
