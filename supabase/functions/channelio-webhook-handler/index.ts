@@ -27,12 +27,33 @@ const LOGILESS_REFRESH_TOKEN = Deno.env.get("LOGILESS_REFRESH_TOKEN");
 const LOGILESS_TOKEN_ENDPOINT = Deno.env.get("LOGILESS_TOKEN_ENDPOINT") || "https://app2.logiless.com/oauth2/token"; // 正しいURL
 const LOGILESS_MERCHANT_ID = Deno.env.get("LOGILESS_MERCHANT_ID"); // ★ 要設定 ★
 
-// OpenAI/RAG Constants
+// OpenAI/RAG Constants (Updated for Hybrid Search)
 const EMBEDDING_MODEL = "text-embedding-3-small";
-const COMPLETION_MODEL = "o4-mini-2025-04-16";
-const MATCH_THRESHOLD = 0.7;
-const MATCH_COUNT = 3;
-const RPC_FUNCTION_NAME = "match_documents";
+const COMPLETION_MODEL = "o4-mini-2025-04-16"; // または利用したいモデル
+// const MATCH_THRESHOLD = 0.7; // <- Old constant, remove or comment out
+// const MATCH_COUNT = 3; // <- Old constant, remove or comment out
+// const RPC_FUNCTION_NAME = "match_documents"; // <- Old constant, remove or comment out
+const HYBRID_RPC_FUNCTION_NAME = "hybrid_search_faq_chunks"; // <- New RPC function name
+// const MATCH_THRESHOLD_VECTOR = 0.7; // ベクトル類似度の閾値 <- Remove
+// const MATCH_THRESHOLD_TRIGRAM = 0.1; // pg_trgm類似度の閾値 (低めに設定) <- Remove
+// const WEIGHT_VECTOR = 0.6; // ベクトルスコアの重み <- Remove
+// const WEIGHT_TRIGRAM = 0.4; // pg_trgmスコアの重み <- Remove
+
+// ───────── Hybrid‑Search Constants (env‑driven) ─────────
+// Note: dotenv/load.ts is often better loaded at the very top if possible
+// but placing it here to be close to usage based on the snippet.
+// Ensure .env exists in the project root or adjust path.
+import "https://deno.land/std@0.210.0/dotenv/load.ts";
+
+const env = Deno.env.toObject();             // .env.* を取り込む
+
+const SEARCH_K          = Number(env.SEARCH_K          ?? 3);    // Default to 3 if not set
+const THRESH_VEC        = Number(env.THRESHOLD_VECTOR  ?? 0.7);
+const THRESH_TRI        = Number(env.THRESHOLD_TRIGRAM ?? 0.1);
+const WEIGHT_VEC        = Number(env.WEIGHT_VECTOR     ?? 0.6);
+const WEIGHT_TRI        = Number(env.WEIGHT_TRIGRAM    ?? 0.4);
+
+console.log("Hybrid Search Params:", { SEARCH_K, THRESH_VEC, THRESH_TRI, WEIGHT_VEC, WEIGHT_TRI }); // Log loaded params
 
 // Filtering Constants
 const OPERATOR_PERSON_TYPES: Set<string> = new Set(['manager']);
@@ -89,6 +110,15 @@ interface LogilessTokenResponse {
     token_type: string;
     expires_in: number;
     refresh_token?: string;
+}
+// New type for hybrid search results
+interface HybridSearchResult {
+  id: string; // uuid
+  question: string;
+  content: string;
+  similarity_vector: number;
+  similarity_trigram: number;
+  final_score: number;
 }
 
 // --- Helper Function: Notify Error to Slack ---
@@ -236,7 +266,7 @@ async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessi
     let step = "Initialization";
     let supabase: SupabaseClient | null = null;
     let queryEmbedding: number[] | null = null;
-    let retrievedDocs: Document[] = [];
+    let retrievedDocs: HybridSearchResult[] = []; // <- Use new type
     let referenceInfo: string = "関連ドキュメントは見つかりませんでした。";
     let aiResponse: string | null = null;
 
@@ -367,41 +397,67 @@ async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessi
             if (!queryEmbedding) { throw new Error("Failed to generate embedding."); }
             console.log(`[${step}] Query vectorized.`);
 
-            // 5. Search Documents (RAG Retrieval)
-            step = "VectorSearch";
-            if (!supabase) throw new Error("Supabase client not initialized for Vector Search.");
-            const { data: documentsData, error: rpcError } = await supabase.rpc(RPC_FUNCTION_NAME, { query_embedding: queryEmbedding, match_threshold: MATCH_THRESHOLD, match_count: MATCH_COUNT });
-            if (rpcError) { throw new Error(`Vector search RPC error: ${rpcError.message}`); }
-            retrievedDocs = (documentsData as Document[]) || [];
-            referenceInfo = retrievedDocs.length > 0 ? retrievedDocs.map(doc => `- ${doc.content}`).join('\n') : '関連ドキュメントは見つかりませんでした。';
-            console.log(`[${step}] Vector search completed. Found ${retrievedDocs.length} documents.`);
+            // 5. Search Documents (RAG Retrieval using Hybrid Search)
+            step = "HybridSearch";
+            if (!supabase) throw new Error("Supabase client not initialized for Hybrid Search.");
+            if (!queryEmbedding) throw new Error("Query embedding not generated.");
+            console.log(`[${step}] Calling RPC: ${HYBRID_RPC_FUNCTION_NAME}`);
+            const { data: documentsData, error: rpcError } = await supabase.rpc(
+                HYBRID_RPC_FUNCTION_NAME, // <- Use new RPC name
+                {
+                    // Pass all required arguments
+                    query_embedding: queryEmbedding,
+                    query_text: query, // Pass original query text
+                    match_threshold_vector: THRESH_VEC,
+                    match_threshold_trigram: THRESH_TRI,
+                    match_count: SEARCH_K,
+                    weight_vector: WEIGHT_VEC,
+                    weight_trigram: WEIGHT_TRI
+                }
+            );
+            if (rpcError) { throw new Error(`Hybrid search RPC error: ${rpcError.message}`); }
+            // Use the new type for casting
+            retrievedDocs = (documentsData as HybridSearchResult[]) || [];
+            // referenceInfo logic remains similar, using doc.content
+            referenceInfo = retrievedDocs.length > 0 ? retrievedDocs.map(doc => `- ${doc.content} (Score: ${doc.final_score.toFixed(3)})`).join('\n') : '関連ドキュメントは見つかりませんでした。';
+            console.log(`[${step}] Hybrid search completed. Found ${retrievedDocs.length} documents.`);
+            // Log scores for debugging if needed
+            // if(retrievedDocs.length > 0) { console.log("Search Results:", retrievedDocs.map(d => ({ score: d.final_score, content: d.content.substring(0, 50) + '...' }))); }
 
-            // 6. Generate AI Response (RAG Generation)
+            // 6. Generate AI Response (RAG Generation - Prompt uses referenceInfo)
             step = "AICreation";
             const prompt = `
 # あなたの役割
-（省略）
+顧客からの問い合わせに対し、提供された情報を元に親切丁寧な回答案を作成するカスタマーサポートAIです。
+
 # 顧客情報・コンテキスト
-（省略）
+顧客名: ${customerName || '不明'}
+（他に必要なコンテキストがあれば追加）
+
 --- ロジレス連携情報 ---
 注文番号: ${orderNumber || '抽出できず'}
 ロジレス情報: ${logilessOrderInfo || '連携なし/失敗'}
 -------------------------
+
 # 実行手順
-（省略）
-# 対応ガイドライン
-（省略）
+1.  お客様の問い合わせ内容と、提供された参考情報（社内FAQ）をよく読んでください。
+2.  問い合わせ内容がサイズに関する相談の場合、以下の「サイズに関するガイドライン」に従って回答を生成してください。
+3.  その他の問い合わせの場合は、「一般的な対応ガイドライン」に従ってください。
+4.  常に丁寧で、共感的な言葉遣いを心がけてください。
+
+# サイズに関するガイドライン ★★★★★重要★★★★★\n1.  **測定値/現在サイズの特定:** お客様の問い合わせから、アンダーバスト、トップバスト、または現在着用しているブラのサイズ（例: G80）を特定します。\n2.  **参考情報の参照:** 提供されている「参考情報」の中から、yeniのサイズ表やサイズに関する推奨事項が**明確に記載されている箇所**を探します。\n3.  **yeniサイズへのマッピング:** 特定した測定値や標準サイズに**対応するyeni独自のサイズ表記（例: S1, M2, L3, L4など）が参考情報内に明確に見つかるか**を確認します。\n    **重要:** 参考情報の中に、お客様のサイズ（測定値または標準サイズ）に対応する**具体的なyeniサイズ表記が見つからない場合は、サイズを推定したり、存在しないサイズコード（例: L5）を作り出したりしないでください。** その場合は、「申し訳ございませんが、いただいた情報と手元の資料だけでは明確なサイズをおすすめすることができません。よろしければ、どの商品にご興味があるかなど、もう少し詳しく教えていただけますでしょうか？」といった旨を正直に伝え、追加情報を尋ねるようにしてください。\n4.  **回答の構成 (yeniサイズが見つかった場合):**\n    *   まず、お客様の状況（測定値、悩み）に共感を示します。\n    *   次に、**参考情報から見つけたyeniのサイズ表記（例: L4）を明確に提示**し、「L4（アンダーバスト75cm〜80cm／G〜Hカップ）をおすすめいたします。」のように、対応する説明も（参考情報にあれば）添えて推奨します。\n    *   **注意:** 回答文の中で、最終的な推奨サイズとして一般的なサイズ表記（G80など）は**使用しないでください**。必ずyeniのサイズ表記を使ってください。\n    *   **製品に関する言及:** ブラ本体以外の製品（パッド、アクセサリー等）について言及する場合は、**必ず「参考情報」セクションにその製品に関する記述がある場合に限定してください。** 参考情報に記載のない製品名を提案したり、存在しない製品（例：「専用パッド」）を示唆したりしてはいけません。左右差の調整についてパッドに言及する場合は、「お手持ちのパッド」「薄手のパッド」といった一般的な表現に留めてください。\n    *   必要に応じて、サイズ交換に関する情報（参考情報にあれば）も付け加えます。\n    *   最後は、お客様を気遣う言葉で締めくくります。\n\n# 一般的な対応ガイドライン\n
+
 ---
 # 参考情報 (社内ドキュメントより):
 ${referenceInfo}
 ---
 # お客様からの問い合わせ内容
-\\\`\\\`\\\`
+\`\`\`
 ${query}
-\\\`\\\`\\\`
+\`\`\`
 回答案:
             `.trim();
-            const completionPayload = { model: COMPLETION_MODEL, messages: [{ role: "user", content: prompt }], temperature: 0.5 };
+            const completionPayload = { model: COMPLETION_MODEL, messages: [{ role: "user", content: prompt }] };
             const completionResponse = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(completionPayload) });
             if (!completionResponse.ok) { const errorText = await completionResponse.text(); throw new Error(`OpenAI Chat Completion API request failed: ${completionResponse.status} ${errorText.substring(0, 200)}`); }
             const completionData = await completionResponse.json();

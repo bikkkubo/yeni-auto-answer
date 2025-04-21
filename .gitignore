@@ -1,1 +1,7 @@
-supabase/.env\nsupabase/.env.local\n 
+supabase/.env\nsupabase/.env.local\n
+
+# Project root env file
+.env
+
+# Node modules in scripts directory
+/scripts/node_modules/ 
