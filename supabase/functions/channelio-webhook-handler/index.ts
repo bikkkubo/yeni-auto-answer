@@ -251,6 +251,73 @@ async function getLogilessAccessToken(): Promise<string | null> {
     }
 }
 
+// --- Helper Function: Detect Bra Sizing Query ---
+function isBraSizingQuery(query: string): boolean {
+    const lowerQuery = query.toLowerCase();
+    const keywords = ["サイズ", "カップ", "アンダー", "トップ", "大きい", "小さい", "きつい", "ゆるい", "ブラ", "ブラジャー", "測り方", "選び方", "g80", "c75"];
+    const sizePattern = /[a-zA-Z]+[0-9]+/;
+
+    const keywordMatch = keywords.some(kw => lowerQuery.includes(kw));
+    const patternMatch = sizePattern.test(lowerQuery);
+
+    console.log(`[isBraSizingQuery Debug] lowerQuery: ${lowerQuery.substring(0,100)}...`); // Log first 100 chars
+    console.log(`[isBraSizingQuery Debug] keywordMatch: ${keywordMatch}`);
+    console.log(`[isBraSizingQuery Debug] patternMatch: ${patternMatch}`);
+
+    return keywordMatch || patternMatch;
+}
+
+// --- Helper Function: Extract Bra Size Info ---
+interface ExtractedBraInfo {
+    under?: number;
+    top?: number;
+    cup?: string;
+}
+
+function extractBraSizeInfo(query: string): ExtractedBraInfo {
+    const info: ExtractedBraInfo = {};
+
+    // Extract numbers preceded by アンダー or under (e.g., アンダー80)
+    const underMatch = query.match(/(?:アンダー|under)\s*[:：]?\s*(\d{2,3})/i);
+    if (underMatch?.[1]) {
+        info.under = parseInt(underMatch[1], 10);
+    }
+
+    // Extract numbers preceded by トップ or top (e.g., トップ107)
+    const topMatch = query.match(/(?:トップ|top)\s*[:：]?\s*(\d{2,3})/i);
+    if (topMatch?.[1]) {
+        info.top = parseInt(topMatch[1], 10);
+    }
+
+    // Extract cup size (e.g., G80 -> G, Gカップ -> G) - prioritize standard format first
+    const standardSizeMatch = query.match(/([a-zA-Z]+)\s*(\d{2,3})/i);
+     if (standardSizeMatch?.[1] && standardSizeMatch?.[2]) {
+        info.cup = standardSizeMatch[1].toUpperCase();
+        // If under wasn't extracted specifically, try getting it from standard size
+        if (!info.under) {
+            info.under = parseInt(standardSizeMatch[2], 10);
+        }
+    } else {
+        // Try matching "Gカップ" format
+        const cupLetterMatch = query.match(/([a-jA-J])\s*カップ/i);
+        if (cupLetterMatch?.[1]) {
+            info.cup = cupLetterMatch[1].toUpperCase();
+        }
+    }
+     // Simple extraction for "普段G80" - Overwrite if more specific matches found above
+    const usualSizeMatch = query.match(/普段\s*([a-zA-Z]+)(\d{2,3})/i);
+     if (usualSizeMatch?.[1] && !info.cup) {
+         info.cup = usualSizeMatch[1].toUpperCase();
+     }
+     if (usualSizeMatch?.[2] && !info.under) {
+         info.under = parseInt(usualSizeMatch[2], 10);
+     }
+
+
+    console.log("[extractBraSizeInfo] Extracted:", info);
+    return info;
+}
+
 // --- Main Background Processing Function ---
 // Add skipAiProcessing parameter
 async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessing: boolean = false) {
@@ -269,6 +336,10 @@ async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessi
     let retrievedDocs: HybridSearchResult[] = []; // <- Use new type
     let referenceInfo: string = "関連ドキュメントは見つかりませんでした。";
     let aiResponse: string | null = null;
+    let isSizingQuery = false;
+    let extractedInfo: ExtractedBraInfo = {};
+    let recommendedYeniSize: string | null = null;
+    let sizeNote: string | null = null;
 
     try {
         // ★ スレッドID取得を追加 ★
@@ -430,6 +501,11 @@ async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessi
 # あなたの役割
 顧客からの問い合わせに対し、提供された情報を元に親切丁寧な回答案を作成するカスタマーサポートAIです。
 
+# Yeni製品に関する基本情報 ★★★★★重要★★★★★
+*   現在、主に「ノンワイヤーブラ」と「レースノンワイヤーブラ」の2種類のブラを提供しています。
+*   これら2種類のブラは、基本的な形状とサイズ感は共通です。
+*   「フルカップ」や「3/4カップ」といった他のカップ形状のブラは提供していません。
+
 # 顧客情報・コンテキスト
 顧客名: ${customerName || '不明'}
 （他に必要なコンテキストがあれば追加）
@@ -440,15 +516,37 @@ async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessi
 -------------------------
 
 # 実行手順
-1.  お客様の問い合わせ内容と、提供された参考情報（社内FAQ）をよく読んでください。
+1.  お客様の問い合わせ内容と、提供された情報をよく読んでください。
 2.  問い合わせ内容がサイズに関する相談の場合、以下の「サイズに関するガイドライン」に従って回答を生成してください。
 3.  その他の問い合わせの場合は、「一般的な対応ガイドライン」に従ってください。
 4.  常に丁寧で、共感的な言葉遣いを心がけてください。
 
-# サイズに関するガイドライン ★★★★★重要★★★★★\n1.  **測定値/現在サイズの特定:** お客様の問い合わせから、アンダーバスト、トップバスト、または現在着用しているブラのサイズ（例: G80）を特定します。\n2.  **参考情報の参照:** 提供されている「参考情報」の中から、yeniのサイズ表やサイズに関する推奨事項が**明確に記載されている箇所**を探します。\n3.  **yeniサイズへのマッピング:** 特定した測定値や標準サイズに**対応するyeni独自のサイズ表記（例: S1, M2, L3, L4など）が参考情報内に明確に見つかるか**を確認します。\n    **重要:** 参考情報の中に、お客様のサイズ（測定値または標準サイズ）に対応する**具体的なyeniサイズ表記が見つからない場合は、サイズを推定したり、存在しないサイズコード（例: L5）を作り出したりしないでください。** その場合は、「申し訳ございませんが、いただいた情報と手元の資料だけでは明確なサイズをおすすめすることができません。よろしければ、どの商品にご興味があるかなど、もう少し詳しく教えていただけますでしょうか？」といった旨を正直に伝え、追加情報を尋ねるようにしてください。\n4.  **回答の構成 (yeniサイズが見つかった場合):**\n    *   まず、お客様の状況（測定値、悩み）に共感を示します。\n    *   次に、**参考情報から見つけたyeniのサイズ表記（例: L4）を明確に提示**し、「L4（アンダーバスト75cm〜80cm／G〜Hカップ）をおすすめいたします。」のように、対応する説明も（参考情報にあれば）添えて推奨します。\n    *   **注意:** 回答文の中で、最終的な推奨サイズとして一般的なサイズ表記（G80など）は**使用しないでください**。必ずyeniのサイズ表記を使ってください。\n    *   **製品に関する言及:** ブラ本体以外の製品（パッド、アクセサリー等）について言及する場合は、**必ず「参考情報」セクションにその製品に関する記述がある場合に限定してください。** 参考情報に記載のない製品名を提案したり、存在しない製品（例：「専用パッド」）を示唆したりしてはいけません。左右差の調整についてパッドに言及する場合は、「お手持ちのパッド」「薄手のパッド」といった一般的な表現に留めてください。\n    *   必要に応じて、サイズ交換に関する情報（参考情報にあれば）も付け加えます。\n    *   最後は、お客様を気遣う言葉で締めくくります。\n\n# 一般的な対応ガイドライン\n
+# サイズに関するガイドライン ★★★★★重要★★★★★
+1.  **測定値/現在サイズの特定:** お客様の問い合わせから、アンダーバスト、トップバスト、または現在着用しているブラのサイズ（例: G80）を特定します。
+2.  **参考情報の参照:** 提供されている「参考情報」の中から、yeniのサイズ表やサイズに関する推奨事項が**明確に記載されている箇所**を探します。
+3.  **yeniサイズへのマッピング:** 特定した測定値や標準サイズに**対応するyeni独自のサイズ表記（例: S1, M2, L3, L4など）が参考情報内に明確に見つかるか**を確認します。
+    **重要:** 参考情報の中に、お客様のサイズ（測定値または標準サイズ）に対応する**具体的なyeniサイズ表記が見つからない場合は、サイズを推定したり、存在しないサイズコード（例: L5）を作り出したりしないでください。** **以下の「サイズ推奨不可の場合の回答」に従ってください。**
+4.  **回答の構成 (yeniサイズが見つかった場合):**
+    *   まず、お客様の状況（測定値、悩み）に共感を示します。
+    *   次に、**参考情報から見つけたyeniのサイズ表記（例: L4）を明確に提示**し、「L4（アンダーバスト75cm〜80cm／G〜Hカップ）をおすすめいたします。」のように、対応する説明も（参考情報にあれば）添えて推奨します。データベースからの推奨であることを伝えても構いません。
+    *   **注意:** 回答文の中で、最終的な推奨サイズとして一般的なサイズ表記（G80など）は**使用しないでください**。必ずyeniのサイズ表記を使ってください。
+    *   **製品に関する言及:** ブラ本体以外の製品（パッド、アクセサリー等）について言及する場合は、**必ず「参考情報」セクションにその製品に関する記述がある場合に限定してください。** 参考情報に記載のない製品名を提案したり、存在しない製品（例：「専用パッド」）を示唆したりしてはいけません。左右差の調整についてパッドに言及する場合は、「お手持ちのパッド」「薄手のパッド」といった一般的な表現に留めてください。（参考情報があれば、それに従ってください）
+    *   必要に応じて、サイズ交換に関する情報（参考情報にあれば）も付け加えます。
+    *   最後は、お客様を気遣う言葉で締めくくります。
+
+# サイズ推奨不可の場合の回答 ★★★★★重要★★★★★
+1.  まず、お問い合わせいただいたことへの感謝と、お客様の状況への共感を伝えます。
+2.  次に、「申し訳ございませんが、いただいた情報だけでは明確なサイズをおすすめすることができません。」のように、**推奨できない旨を正直に伝えてください。**
+3.  続けて、**以下のように追加情報をお尋ねください。**
+    *   「よろしければ、ご検討中のブラの種類（ノンワイヤーブラ、またはレースノンワイヤーブラ）と、ご希望のフィット感（例：ゆったりめ、しっかりホールド）を教えていただけますでしょうか？」
+    *   **注意:** この際、yeniで提供していないブラのタイプ（例: フルカップ、3/4カップ）には**絶対に言及しないでください。** また、ノンワイヤーブラとレースノンワイヤーブラの形状が大きく異なると示唆するような表現も避けてください。
+4.  最後は、お客様を気遣う言葉で締めくくります。
+
+# 一般的な対応ガイドライン
+（省略 - 既存のガイドラインがあればここに記述）
 
 ---
-# 参考情報 (社内ドキュメントより):
+# 参考情報 (FAQ検索結果 - サイズ以外の補足情報として利用):
 ${referenceInfo}
 ---
 # お客様からの問い合わせ内容
@@ -602,7 +700,7 @@ serve(async (req: Request) => {
         const payload: ChannelioWebhookPayload = await req.json();
         // console.log("Received webhook payload:", JSON.stringify(payload, null, 2)); // 必要ならコメント解除
 
-        // 3. Filter Requests (Revised)
+        // 3. Filter Requests (Revised) - Add detailed logging
         const entity = payload.entity;
         const personType = entity?.personType;
         const messageText = entity?.plainText?.trim();
@@ -612,25 +710,40 @@ serve(async (req: Request) => {
         let skipReason: string | null = null;
         let triggerNotificationOnly = false; // Flag for notify-only messages
 
-        if (eventType !== 'push' || messageType !== 'message') { skipReason = `Not a message push event (event: ${eventType}, type: ${messageType})`; }
-        else if (!messageText) { skipReason = "empty message"; }
-        else if (entity?.options?.includes("private")) { skipReason = "private message"; }
-        else if (personType && OPERATOR_PERSON_TYPES.has(personType)) { skipReason = `operator message (type: ${personType})`; }
-        // ★★★ Add check for the specific initial bot greeting ★★★
-        else if (messageText === INITIAL_BOT_GREETING) { skipReason = "initial bot greeting"; }
-        // ★★★ End of added check ★★★
-        else if (personType === BOT_PERSON_TYPE && messageText && IGNORED_BOT_MESSAGES.has(messageText)) { skipReason = "ignored bot message"; }
-        else if (entity?.workflowButton) { skipReason = "workflow button"; }
-        else if (messageText && IGNORED_KEYWORDS.some(keyword => messageText.includes(keyword))) {
+        console.log("[Filter Debug] Start filtering..."); // Add start log
+
+        if (eventType !== 'push' || messageType !== 'message') {
+            skipReason = `Not a message push event (event: ${eventType}, type: ${messageType})`;
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (!messageText) {
+            skipReason = "empty message";
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (entity?.options?.includes("private")) {
+            skipReason = "private message";
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (personType && OPERATOR_PERSON_TYPES.has(personType)) {
+            skipReason = `operator message (type: ${personType})`;
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (messageText === INITIAL_BOT_GREETING) {
+            skipReason = "initial bot greeting";
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (personType === BOT_PERSON_TYPE && messageText && IGNORED_BOT_MESSAGES.has(messageText)) {
+            skipReason = "ignored bot message";
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (entity?.workflowButton) {
+            skipReason = "workflow button";
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (messageText && IGNORED_KEYWORDS.some(keyword => messageText.includes(keyword))) {
             const foundKeyword = IGNORED_KEYWORDS.find(keyword => messageText.includes(keyword));
             skipReason = `ignored keyword: ${foundKeyword}`;
-        }
-        // ★★★ Check for Notify Only Messages AFTER other filters ★★★
-        else if (messageText && NOTIFY_ONLY_MESSAGES.has(messageText)) {
+            console.log(`[Filter Debug] ${skipReason}`); // Log reason
+        } else if (messageText && NOTIFY_ONLY_MESSAGES.has(messageText)) {
             triggerNotificationOnly = true;
-            console.log(`[Filter] Identified as notify-only message: "${messageText.substring(0, 50)}..."`);
+            console.log(`[Filter Debug] Identified as notify-only message: "${messageText.substring(0, 50)}..."`);
             // Not setting skipReason here, as we want to proceed to background processing
         }
+
+        console.log(`[Filter Debug] Filtering complete. skipReason: ${skipReason}, triggerNotificationOnly: ${triggerNotificationOnly}`); // Add end log
 
         if (skipReason) {
             console.log(`[Filter] Skipping webhook processing: ${skipReason}`);
