@@ -29,7 +29,7 @@ const LOGILESS_MERCHANT_ID = Deno.env.get("LOGILESS_MERCHANT_ID"); // ★ 要設
 
 // OpenAI/RAG Constants
 const EMBEDDING_MODEL = "text-embedding-3-small";
-const COMPLETION_MODEL = "gpt-4o-mini";
+const COMPLETION_MODEL = "o1-2024-12-17"; // ★ 再度修正 ★
 const MATCH_THRESHOLD = 0.7;
 const MATCH_COUNT = 3;
 const RPC_FUNCTION_NAME = "match_documents";
@@ -378,30 +378,8 @@ async function processUserQuery(payload: ChannelioWebhookPayload, skipAiProcessi
 
             // 6. Generate AI Response (RAG Generation)
             step = "AICreation";
-            const prompt = `
-# あなたの役割
-（省略）
-# 顧客情報・コンテキスト
-（省略）
---- ロジレス連携情報 ---
-注文番号: ${orderNumber || '抽出できず'}
-ロジレス情報: ${logilessOrderInfo || '連携なし/失敗'}
--------------------------
-# 実行手順
-（省略）
-# 対応ガイドライン
-（省略）
----
-# 参考情報 (社内ドキュメントより):
-${referenceInfo}
----
-# お客様からの問い合わせ内容
-\\\`\\\`\\\`
-${query}
-\\\`\\\`\\\`
-回答案:
-            `.trim();
-            const completionPayload = { model: COMPLETION_MODEL, messages: [{ role: "user", content: prompt }], temperature: 0.5 };
+            const prompt = `\n# あなたの役割\nあなたは顧客サポートAIアシスタントです。Channelio経由で寄せられた顧客からの問い合わせに対し、提供された情報を基に、丁寧かつ正確な回答案を作成してください。回答はSlack通知に適した形式である必要があり、顧客への直接の返信ではありません。\n\n# 顧客情報・コンテキスト\n顧客名: ${customerName || '不明'}\n問い合わせ内容の言語: 日本語\n\n--- ロジレス連携情報 ---\n注文番号: ${orderNumber || '抽出できず'}\nロジレス情報: ${logilessOrderInfo || '連携なし/失敗'}\n-------------------------\n\n# 実行手順\n1.  **問い合わせ内容の理解:** まず、顧客が何について尋ねているかを正確に把握します。\n2.  **関連情報の参照:** 提供された「# 参考情報 (社内ドキュメントより)」セクションの内容を確認し、問い合わせ内容に直接関連する情報があるかを確認します。\n3.  **★ サイズに関する問い合わせの場合:**\n    *   顧客がブラジャーやボトムスのサイズについて尋ねている場合（例：「アンダー75、カップFのサイズは？」、「ヒップ90cmは何サイズ？」）、**最優先で「# 参考情報」を確認**してください。\n    *   参考情報の中に \`YENIサイズ「(サイズ名)」は...\` という形式のテキスト（\`source_type\`が\`sizes\`または\`bottom_sizes\`のもの）が見つかった場合、その \`(サイズ名)\` (例: L3, M) を特定してください。\n    *   **特定したYENIサイズを、お客様への回答案の中で明確に推奨してください。** 例：「お問い合わせのサイズですと、YENIサイズでは「L3」が最も近いかと思われます。」「YENIボトムスサイズでは「M」が対応範囲内です。」のように記述します。\n    *   該当するサイズ情報が参考情報に見つからない場合に限り、サイズ表の確認や試着を促す一般的なアドバイスを行ってください。\n4.  **回答案の生成:** 上記を踏まえ、丁寧な言葉遣いで、顧客の疑問に答える回答案を作成します。\n5.  **簡潔性:** 回答案は冗長にならないよう、簡潔にまとめます。\n\n# 対応ガイドライン\n*   常に丁寧で共感的な言葉遣いを心がけてください。\n*   専門用語は避け、分かりやすい言葉で説明してください。\n*   不確かな情報や推測に基づく回答は避けてください。\n*   参考情報に該当する情報がない場合は、正直に「該当する情報が見つかりませんでした」と伝え、可能な代替案（例：カスタマーサポートへの問い合わせ誘導）を示してください。\n*   個人情報（名前、住所、電話番号など）を含む回答は生成しないでください。\n*   回答は顧客への直接返信ではなく、あくまで社内オペレーター向けの「回答案」として生成してください。\n\n---\n# 参考情報 (社内ドキュメントより):\n${referenceInfo}\n---\n# お客様からの問い合わせ内容\n\`\`\`\n${query}\n\`\`\`\n回答案:\n            `.trim();
+            const completionPayload = { model: COMPLETION_MODEL, messages: [{ role: "user", content: prompt }] };
             const completionResponse = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` }, body: JSON.stringify(completionPayload) });
             if (!completionResponse.ok) { const errorText = await completionResponse.text(); throw new Error(`OpenAI Chat Completion API request failed: ${completionResponse.status} ${errorText.substring(0, 200)}`); }
             const completionData = await completionResponse.json();
